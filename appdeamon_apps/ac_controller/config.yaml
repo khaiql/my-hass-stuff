@@ -1,0 +1,38 @@
+ac_controller:
+  module: ac_controller
+  class: AirconController
+
+  bedroom:
+    temperature_entity_id: b1
+    switch_entity_id: 
+    state_entity_id: se1
+    priority: 1
+  kitchen:
+    temperature_entity_id: b2
+    switch_entity_id: s2
+    state_entity_id: se2
+    priority: 2
+  study:
+    temperature_entity_id: b3
+    switch_entity_id: s3
+    state_entity_id: se3
+    priority: 1
+
+  desired_temperature_helper_id: desired_temperature_helper_id
+  trigger_threshold_helper_id: trigger_theshold_helper_id
+  power_on_strategy: all / at-least-one
+  power_switch_entity_id: power_entity_id
+  mode: heating/cooling
+
+switch_state_manager:
+  module: ac_switch_state_manager
+  class: ACSwitchStateManager
+  bedroom:
+    switch_entity: 1
+    state_entity: 1
+  kitchen:
+    switch_entity: 1
+    state_entity: 1
+  study:
+    switch_entity: 1
+    state_entity: 1
