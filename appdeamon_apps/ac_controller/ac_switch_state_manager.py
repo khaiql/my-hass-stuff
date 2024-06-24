@@ -22,17 +22,20 @@ class ACSwitchStateManager(hass.Hass):
     self.log(f"dictionary {self.switches_dict}")
 
     for switch in self.switches_dict.values():
-      switch.listen_state(self.reconcile_switch_states)
+      switch.listen_state(self.switch_state_callback)
 
     for state in [self.bedroom_state, self.kitchen_state, self.study_state]:
-      state.listen_state(self.toggle_switch_based_on_zone_state)
+      state.listen_state(self.automation_zone_callback)
 
 
-  def reconcile_switch_states(self, *args, **kwargs):
-    if self.kitchen_switch.is_state('off') and self.study_switch.is_state('off'):
+  def switch_state_callback(self, entity, attribute, old, new, **kwargs):
+    if old == new:
+      self.log(f"getting odd case for {entity} where old == new == {new}")
+
+    if self.kitchen_switch.is_state('off') and self.study_switch.is_state('off') and not self.bedroom_switch.is_state('on'):
       self.bedroom_switch.set_state(state='on')
 
-  def toggle_switch_based_on_zone_state(self, zone_state, attribute, old, new, **kwargs):
+  def automation_zone_callback(self, zone_state, attribute, old, new, **kwargs):
     switch = self.switches_dict[zone_state]
-    if not switch.is_state(new):
+    if new == 'off' and not switch.is_state('off'):
       switch.toggle()

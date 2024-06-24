@@ -76,9 +76,10 @@ class TestAirconController(unittest.TestCase):
 
         self.assertEqual(self.mock_hass.determine_power_state(), 'on')
 
-    def test_determine_switch_states_with_two_zones_and_bedroom_zone_isnt_good(self):
+    def test_determine_switch_states_with_two_zones_and_bedroom_zone_isnt_good_and_bedroom_is_running(self):
         self.mock_hass.active_zones.return_value = [self.bedroom_zone, self.kitchen_zone]
 
+        self.bedroom_zone.is_running = MagicMock(return_value=True)
         self.bedroom_zone.has_reached_desired_temp = MagicMock(return_value=False)
         self.kitchen_zone.has_reached_desired_temp = MagicMock(return_value=False)
 
@@ -86,9 +87,10 @@ class TestAirconController(unittest.TestCase):
         expected = {'bedroom': 'on', 'kitchen': 'off'}
         self.assertEqual(result, expected)
 
-    def test_determine_switch_states_with_two_zones_and_bedroom_zone_is_cool(self):
+    def test_determine_switch_states_with_two_zones_and_bedroom_zone_is_cool_and_is_running(self):
         self.mock_hass.active_zones.return_value = [self.bedroom_zone, self.kitchen_zone]
 
+        self.bedroom_zone.is_running = MagicMock(return_value=True)
         self.bedroom_zone.has_reached_desired_temp = MagicMock(return_value=True)
         self.kitchen_zone.has_reached_desired_temp = MagicMock(return_value=False)
 
@@ -96,27 +98,45 @@ class TestAirconController(unittest.TestCase):
         expected = {'bedroom': 'off', 'kitchen': 'on'}
         self.assertEqual(result, expected)
 
-    def test_determine_switch_states_with_three_zones_and_bedroom_zone_is_cool(self):
+    def test_determine_switch_states_with_three_zones_and_bedroom_zone_is_good_and_not_running(self):
         self.mock_hass.active_zones.return_value = [self.bedroom_zone, self.study_zone, self.kitchen_zone]
 
+        self.bedroom_zone.is_running = MagicMock(return_value=False)
         self.bedroom_zone.has_reached_desired_temp = MagicMock(return_value=True)
+        self.bedroom_zone.is_out_of_desired_temp = MagicMock(return_value=False)
         self.kitchen_zone.has_reached_desired_temp = MagicMock(return_value=False)
         self.study_zone.has_reached_desired_temp = MagicMock(return_value=False)
+        self.study_zone.is_running = MagicMock(return_value=True)
 
         result = self.mock_hass.determine_zone_switch_states()
         expected = {'bedroom': 'off', 'kitchen': 'off', 'study': 'on'}
         self.assertEqual(result, expected)
 
-    def test_determine_switch_states_with_three_zones_and_bedroom_zone_is_not_cool(self):
-        self.mock_hass.active_zones.return_value = [self.bedroom_zone, self.study_zone, self.kitchen_zone]
+    def test_determine_switch_states_with_two_zones_and_bedroom_zone_is_not_out_of_range_and_is_not_running(self):
+        self.mock_hass.active_zones.return_value = [self.bedroom_zone, self.kitchen_zone]
 
         self.bedroom_zone.has_reached_desired_temp = MagicMock(return_value=False)
+        self.bedroom_zone.is_out_of_desired_temp = MagicMock(return_value=False)
+        self.bedroom_zone.is_running = MagicMock(return_value=False)
         self.kitchen_zone.has_reached_desired_temp = MagicMock(return_value=False)
-        self.study_zone.has_reached_desired_temp = MagicMock(return_value=False)
 
         result = self.mock_hass.determine_zone_switch_states()
-        expected = {'bedroom': 'on', 'kitchen': 'off', 'study': 'on'}
+        expected = {'bedroom': 'off', 'kitchen': 'on'}
         self.assertEqual(result, expected)
+
+    def test_determine_switch_states_with_kitchen_and_bedroom_and_bedroom_is_out_of_range_and_kitchen_is_running(self):
+        self.mock_hass.active_zones.return_value = [self.bedroom_zone, self.kitchen_zone]
+
+        self.bedroom_zone.has_reached_desired_temp = MagicMock(return_value=False)
+        self.bedroom_zone.is_out_of_desired_temp = MagicMock(return_value=True)
+        self.bedroom_zone.is_running = MagicMock(return_value=False)
+        self.bedroom_zone.is_running = MagicMock(return_value=True)
+        self.kitchen_zone.has_reached_desired_temp = MagicMock(return_value=False)
+
+        result = self.mock_hass.determine_zone_switch_states()
+        expected = {'bedroom': 'on', 'kitchen': 'off'}
+        self.assertEqual(result, expected)
+
 
     @patch('__main__.SwitchesManager')
     def test_smart_control_bedroom_is_active_and_not_cool(self, MockSwitchesManager):

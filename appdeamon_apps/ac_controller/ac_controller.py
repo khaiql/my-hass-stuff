@@ -2,6 +2,8 @@ import appdaemon.plugins.hass.hassapi as hass
 from itertools import groupby
 from operator import attrgetter
 
+SETTING_DELAY_DURATION_SECOND=2
+
 class Zone:
     def __init__(self, adapi, name, config={}):
         self.adapi = adapi
@@ -15,14 +17,11 @@ class Zone:
         self.desired_temperature_setting_entity = self.adapi.get_entity(config["desired_temperature_entity_id"]) if "desired_temperature_entity_id" in config else None
         self.threshold_entity = self.adapi.get_entity(config["threshold_entity_id"]) if "threshold_entity_id" in config else None
 
-    def get_temperature_sensor(self):
-        return self.adapi.get_entity(self.temperature_entity_id)
-
-    def get_fingerbot_switch(self):
-        return self.adapi.get_entity(self.fingerbot_entity_id)
-
     def is_ac_controlled(self):
         return self.zone_state.get_state() == 'on'
+
+    def is_running(self):
+        return self.fingerbot_switch.is_state('on')
 
     def get_current_temperature(self):
         return float(self.temperature_sensor.get_state())
@@ -55,12 +54,12 @@ class Zone:
         self.temperature_sensor.listen_state(callback)
         self.zone_state.listen_state(callback)
         if self.desired_temperature_setting_entity is not None:
-            self.desired_temperature_setting_entity.listen_state(callback)
+            self.desired_temperature_setting_entity.listen_state(callback, duration=SETTING_DELAY_DURATION_SECOND)
         if self.threshold_entity is not None:
-            self.threshold_entity.listen_state(callback)
+            self.threshold_entity.listen_state(callback, duration=SETTING_DELAY_DURATION_SECOND)
 
     def __str__(self):
-        return f"{self.name} priority={self.priority} active={self.is_ac_controlled()} switch_state={self.get_fingerbot_switch().get_state()} current_temp={self.get_current_temperature()}"
+        return f"{self.name} priority={self.priority} active={self.is_ac_controlled()} switch_state={self.fingerbot_switch.get_state()} current_temp={self.get_current_temperature()}"
 
 class AirconController(hass.Hass):
     def initialize(self):
@@ -86,8 +85,8 @@ class AirconController(hass.Hass):
         for zone in self.zones:
             zone.listen_state(self.smart_control)
 
-        self.desired_temperature_entity.listen_state(self.smart_control)
-        self.trigger_threshold_entity.listen_state(self.smart_control)
+        self.desired_temperature_entity.listen_state(self.smart_control, duration=SETTING_DELAY_DURATION_SECOND)
+        self.trigger_threshold_entity.listen_state(self.smart_control, duration=SETTING_DELAY_DURATION_SECOND)
 
     def get_desired_temperature(self):
         return float(self.desired_temperature_entity.get_state())
@@ -156,13 +155,24 @@ class AirconController(hass.Hass):
         states = {zone.name: 'off' for zone in self.active_zones()}
 
         for index, group in enumerate(groups):
-            group_state = 'off'
+            # scenario 1: priority zone is running and has not reached desired temp, then keep it running and turn off other zones
+            # scenario 2: priority zone is not running, but still within range, then keep it shut off and run other zones
+            # scenario 3: priority zone is not running, and it's out of range, then turn it on
+            group_state = None
             for zone in group:
-                if zone.has_reached_desired_temp(self.get_desired_temperature(), mode=self.get_mode()):
-                    states[zone.name] = 'off'
+                if zone.is_running():
+                    if zone.has_reached_desired_temp(self.get_desired_temperature(), mode=self.get_mode()):
+                        states[zone.name] = 'off'
+                    else:
+                        states[zone.name] = 'on'
                 else:
-                    group_state = 'on'
-                    states[zone.name] = 'on'
+                    if zone.is_out_of_desired_temp(self.get_desired_temperature(), self.get_trigger_threshold(), mode=self.get_mode()):
+                        states[zone.name] = 'on' # turn the zone back on
+                    else:
+                        states[zone.name] = 'off' # keep it off and let other zones run
+
+                group_state = 'on' if states[zone.name] == 'on' and group_state is None else None
+
             if group_state == 'on' and index < len(groups) - 1:
                 lower_prio_zones = [zone for group in groups[index+1:] for zone in group]
                 for zone in lower_prio_zones:
@@ -181,16 +191,11 @@ class SwitchesManager:
 
 
     def update_states(self, bedroom=None, kitchen=None, study=None):
-        if kitchen != None and kitchen != self.kitchen_switch.get_state():
+        if kitchen != None and not self.kitchen_switch.is_state(kitchen):
             self.kitchen_switch.toggle()
 
-        if study != None and study != self.study_switch.get_state():
+        if study != None and not self.study_switch.is_state(study):
             self.study_switch.toggle()
 
-        if kitchen == 'off' and study == 'off':
-            bedroom = 'on' # bed room will be on by default, so don't need to toggle it
-            if self.bedroom_switch.get_state() != 'on':
-                self.bedroom_switch.set_state(state='on')
-
-        if bedroom is not None and bedroom != self.bedroom_switch.get_state():
+        if (kitchen != 'off' or study != 'off') and (bedroom is not None and not self.bedroom_switch.is_state(bedroom)):
             self.bedroom_switch.toggle()
