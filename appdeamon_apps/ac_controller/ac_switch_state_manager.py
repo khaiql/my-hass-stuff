@@ -3,7 +3,6 @@ import appdaemon.plugins.hass.hassapi as hass
 class ACSwitchStateManager(hass.Hass):
   def initialize(self):
 
-    self.log(f"args {self.args}")
     self.bedroom_switch = self.get_entity(self.args['bedroom']['switch_entity'])
     self.bedroom_state = self.get_entity(self.args['bedroom']['state_entity'])
 
@@ -19,8 +18,6 @@ class ACSwitchStateManager(hass.Hass):
       self.study_state.entity_id: self.study_switch,
     }
 
-    self.log(f"dictionary {self.switches_dict}")
-
     for switch in self.switches_dict.values():
       switch.listen_state(self.switch_state_callback)
 
@@ -29,13 +26,13 @@ class ACSwitchStateManager(hass.Hass):
 
 
   def switch_state_callback(self, entity, attribute, old, new, **kwargs):
-    if old == new:
-      self.log(f"getting odd case for {entity} where old == new == {new}")
+    self.log(f"switch_state_callback {entity=} {old=} {new=}")
 
     if self.kitchen_switch.is_state('off') and self.study_switch.is_state('off') and not self.bedroom_switch.is_state('on'):
       self.bedroom_switch.set_state(state='on')
 
   def automation_zone_callback(self, zone_state, attribute, old, new, **kwargs):
+    self.log(f"zone_callback {zone_state=} {old=} {new=}")
     switch = self.switches_dict[zone_state]
     if new == 'off' and not switch.is_state('off'):
       switch.toggle()
