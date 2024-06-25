@@ -196,5 +196,8 @@ class SwitchesManager:
         if study != None and not self.study_switch.is_state(study):
             self.study_switch.toggle()
 
-        if (kitchen != 'off' or study != 'off') and (bedroom is not None and not self.bedroom_switch.is_state(bedroom)):
+        if kitchen == 'off' and study == 'off':
+            return # do nothing with bedroom because it's on anyway
+
+        if bedroom is not None and not self.bedroom_switch.is_state(bedroom):
             self.bedroom_switch.toggle()
