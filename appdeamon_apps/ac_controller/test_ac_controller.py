@@ -149,7 +149,7 @@ class TestAirconController(unittest.TestCase):
         self.bedroom_zone.has_reached_desired_temp = MagicMock(return_value=False)
         self.mock_hass.power_switch.toggle = Mock(return_value=None)
 
-        self.mock_hass.smart_control()
+        self.mock_hass.smart_control('test_entity', {}, 'on', 'off')
 
         self.mock_hass.power_switch.toggle.assert_called_once()
         mock_switches_manager.update_states.assert_called_with(bedroom='on')
@@ -165,10 +165,9 @@ class TestAirconController(unittest.TestCase):
         self.bedroom_zone.has_reached_desired_temp = MagicMock(return_value=False)
         self.mock_hass.power_switch.toggle = Mock(return_value=None)
 
-        self.mock_hass.smart_control()
+        self.mock_hass.smart_control('test_entity', {}, 'on', 'off')
 
         self.mock_hass.power_switch.toggle.assert_not_called()
-        mock_switches_manager.update_states.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()

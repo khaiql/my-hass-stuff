@@ -111,19 +111,18 @@ class AirconController(hass.Hass):
         grouped_zones = groupby(sorted_zones, key=attrgetter('priority'))
         return [list(group) for _, group in grouped_zones]
 
-    def smart_control(self, *args, **kwargs):
+    def smart_control(self, entity, attribute, old, new, **kwargs):
+        self.log(f"small_controll callback {entity=} {old=} {new=}")
+        zone_states = self.determine_zone_switch_states()
+        self.log(f"zones {zone_states=}")
+        if zone_states:
+            self.switches_manager.update_states(**zone_states)
+
         new_state = self.determine_power_state()
-        self.log(f"determining new_state={new_state}")
+        self.log(f"power {new_state=}")
         if new_state != self.power_switch.get_state():
             self.power_switch.toggle()
 
-        if new_state == 'off':
-            return
-
-        zone_states = self.determine_zone_switch_states()
-        self.log(f"determining zone_states={zone_states}")
-        if zone_states:
-            self.switches_manager.update_states(**zone_states)
 
     def determine_power_state(self):
         if len(self.active_zones()) == 0:
