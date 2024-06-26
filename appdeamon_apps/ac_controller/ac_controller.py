@@ -113,15 +113,19 @@ class AirconController(hass.Hass):
 
     def smart_control(self, entity, attribute, old, new, **kwargs):
         self.log(f"small_controll callback {entity=} {old=} {new=}")
+        new_state = self.determine_power_state()
+        self.log(f"power {new_state=}")
+        if new_state != self.power_switch.get_state():
+            self.power_switch.toggle()
+
+        if new_state == 'off':
+            return
+
         zone_states = self.determine_zone_switch_states()
         self.log(f"zones {zone_states=}")
         if zone_states:
             self.switches_manager.update_states(**zone_states)
 
-        new_state = self.determine_power_state()
-        self.log(f"power {new_state=}")
-        if new_state != self.power_switch.get_state():
-            self.power_switch.toggle()
 
 
     def determine_power_state(self):
