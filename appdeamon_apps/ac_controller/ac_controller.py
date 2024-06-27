@@ -118,7 +118,7 @@ class AirconController(hass.Hass):
         return next((zone for zone in self.zones if zone.has_entity(entity)), None)
 
     def smart_control(self, entity, attribute, old, new, **kwargs):
-        self.log(f"small_controll callback {entity=} {old=} {new=}")
+        self.log(f"smart_control callback {entity=} {old=} {new=}")
         new_state = self.determine_power_state()
         self.log(f"power {new_state=}")
         trigger_zone = None
