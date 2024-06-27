@@ -50,6 +50,9 @@ class Zone:
 
         return current_temp > self.get_desired_temperature(global_setting=global_desired_temperature) - self.get_threshold(global_setting=global_threshold)
 
+    def has_entity(self, entity_id):
+        return self.temperature_sensor.entity_id == entity_id or self.zone_state.entity_id == entity_id
+
     def listen_state(self, callback):
         self.temperature_sensor.listen_state(callback)
         self.zone_state.listen_state(callback)
@@ -111,21 +114,31 @@ class AirconController(hass.Hass):
         grouped_zones = groupby(sorted_zones, key=attrgetter('priority'))
         return [list(group) for _, group in grouped_zones]
 
+    def find_trigger_zone(self, entity):
+        return next((zone for zone in self.zones if zone.has_entity(entity)), None)
+
     def smart_control(self, entity, attribute, old, new, **kwargs):
         self.log(f"small_controll callback {entity=} {old=} {new=}")
         new_state = self.determine_power_state()
         self.log(f"power {new_state=}")
+        trigger_zone = None
         if new_state != self.power_switch.get_state():
             self.power_switch.toggle()
+            trigger_zone = self.find_trigger_zone(entity) if new_state == 'on' else None
 
         if new_state == 'off':
             return
 
-        zone_states = self.determine_zone_switch_states()
+        zone_states = self.determine_zone_switch_states(trigger_zone)
         self.log(f"zones {zone_states=}")
+
+        # address an edge case where power remains on but all switches are expected to be off, due to delayed update from sensors
+        if set(zone_states.values()) == set(['off']):
+            self.power_switch.toggle()
+            return
+
         if zone_states:
             self.switches_manager.update_states(**zone_states)
-
 
 
     def determine_power_state(self):
@@ -151,12 +164,16 @@ class AirconController(hass.Hass):
                 return 'on'
             return 'off'
 
-    def determine_zone_switch_states(self):
-        groups = self.zone_groups()
-
+    def determine_zone_switch_states(self, trigger_zone: Zone=None):
         # we only want to manage switch of zones that are active
         states = {zone.name: 'off' for zone in self.active_zones()}
 
+        # if the a/c is triggered to turn on by a zone, prioritize running that zone
+        if trigger_zone is not None:
+            states[trigger_zone.name] = 'on'
+            return states
+
+        groups = self.zone_groups()
         for index, group in enumerate(groups):
             # scenario 1: priority zone is running and has not reached desired temp, then keep it running and turn off other zones
             # scenario 2: priority zone is not running, but still within range, then keep it shut off and run other zones

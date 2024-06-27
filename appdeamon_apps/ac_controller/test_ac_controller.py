@@ -8,9 +8,9 @@ class TestAirconController(unittest.TestCase):
         self.mock_adapi = MagicMock()
 
         # Mock the initialization of the zones
-        self.bedroom_zone = Zone(self.mock_adapi, 'bedroom', config={'priority': 1, 'temperature_entity_id': 1, 'switch_entity_id': 2, 'state_entity_id': 3})
-        self.kitchen_zone = Zone(self.mock_adapi, 'kitchen', config={'priority': 2, 'temperature_entity_id': 1, 'switch_entity_id': 2, 'state_entity_id': 3})
-        self.study_zone = Zone(self.mock_adapi, 'study', config={'priority': 1, 'temperature_entity_id': 1, 'switch_entity_id': 2, 'state_entity_id': 3})
+        self.bedroom_zone = Zone(self.mock_adapi, 'bedroom', config={'priority': 1, 'temperature_entity_id': 1, 'switch_entity_id': 'bedroom_switch', 'state_entity_id': 3})
+        self.kitchen_zone = Zone(self.mock_adapi, 'kitchen', config={'priority': 2, 'temperature_entity_id': 1, 'switch_entity_id': 'kitchen_switch', 'state_entity_id': 3})
+        self.study_zone = Zone(self.mock_adapi, 'study', config={'priority': 1, 'temperature_entity_id': 1, 'switch_entity_id': 'study_switch', 'state_entity_id': 3})
 
         # Create a mock AirconController instance
         self.mock_hass = AirconController()
@@ -168,6 +168,44 @@ class TestAirconController(unittest.TestCase):
         self.mock_hass.smart_control('test_entity', {}, 'on', 'off')
 
         self.mock_hass.power_switch.toggle.assert_not_called()
+
+    @patch('__main__.SwitchesManager')
+    def test_smart_control_all_zones_are_off(self, MockSwitchesManager):
+        self.mock_hass.active_zones.return_value = [self.bedroom_zone]
+        self.mock_hass.power_switch.get_state = MagicMock(return_value='on')
+        mock_switches_manager = MockSwitchesManager()
+        self.mock_hass.switches_manager = mock_switches_manager
+        self.mock_hass.determine_power_state = MagicMock(return_value='on')
+
+        self.bedroom_zone.is_out_of_desired_temp = MagicMock(return_value=False)
+        self.bedroom_zone.has_reached_desired_temp = MagicMock(return_value=True)
+        self.mock_hass.power_switch.toggle = Mock(return_value=None)
+
+        self.mock_hass.smart_control('test_entity', {}, 'on', 'off')
+
+        self.mock_hass.power_switch.toggle.assert_called_once()
+        mock_switches_manager.update_states.assert_not_called()
+
+    @patch('__main__.SwitchesManager')
+    def test_smart_control_with_trigger_zone(self, MockSwitchesManager):
+        self.mock_hass.active_zones.return_value = [self.bedroom_zone, self.kitchen_zone]
+        self.mock_hass.power_switch.get_state = MagicMock(return_value='off')
+        mock_switches_manager = MockSwitchesManager()
+        self.mock_hass.switches_manager = mock_switches_manager
+        self.mock_hass.determine_power_state = MagicMock(return_value='on')
+        self.mock_hass.power_switch.toggle = Mock(return_value=None)
+
+        self.bedroom_zone.is_out_of_desired_temp = MagicMock(return_value=False)
+        self.bedroom_zone.has_reached_desired_temp = MagicMock(return_value=False)
+        self.kitchen_zone.is_out_of_desired_temp = MagicMock(return_value=True)
+        self.kitchen_zone.has_reached_desired_temp = MagicMock(return_value=False)
+
+        self.mock_hass.find_trigger_zone = MagicMock(return_value=self.kitchen_zone)
+        self.mock_hass.smart_control('kitchen_switch', {}, 'on', 'off')
+
+        self.mock_hass.power_switch.toggle.assert_called_once()
+        self.mock_hass.find_trigger_zone.assert_called_once_with('kitchen_switch')
+        mock_switches_manager.update_states.assert_called_with(bedroom='off', kitchen='on')
 
 if __name__ == '__main__':
     unittest.main()
