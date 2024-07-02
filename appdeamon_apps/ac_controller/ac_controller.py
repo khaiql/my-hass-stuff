@@ -142,61 +142,54 @@ class AirconController(hass.Hass):
 
 
     def determine_power_state(self):
-        if len(self.active_zones()) == 0:
+        active_zones = self.active_zones()
+
+        if not active_zones:
             self.log("no active zones")
             return 'off'
 
+        desired_temp = self.get_desired_temperature()
+        mode = self.get_mode()
+
         if self.power_switch.get_state() == 'on':
-            # determine if it should be turned off
-            desired_states = map(lambda z: z.has_reached_desired_temp(self.get_desired_temperature(), mode=self.get_mode()),
-                                self.active_zones())
-            return 'off' if all(desired_states) else 'on'
-        elif self.power_switch.get_state() == 'off':
-            out_of_desired_states = map(lambda z: z.is_out_of_desired_temp(
-                self.get_desired_temperature(),
-                self.get_trigger_threshold(),
-                mode=self.get_mode()),
-            self.active_zones())
+            return 'off' if all(zone.has_reached_desired_temp(desired_temp, mode=mode) for zone in active_zones) else 'on'
 
-            if self.get_power_on_strategy() == 'all' and all(out_of_desired_states):
-                return 'on'
-            if self.get_power_on_strategy() == 'at_least_one' and any(out_of_desired_states):
-                return 'on'
-            return 'off'
+        # Power switch is off
+        out_of_desired_states = [zone.is_out_of_desired_temp(desired_temp, self.get_trigger_threshold(), mode=mode) for zone in active_zones]
+        power_on_strategy = self.get_power_on_strategy()
 
-    def determine_zone_switch_states(self, trigger_zone: Zone=None):
-        # we only want to manage switch of zones that are active
-        states = {zone.name: 'off' for zone in self.active_zones()}
+        if (power_on_strategy == 'all' and all(out_of_desired_states)) or \
+        (power_on_strategy == 'any' and any(out_of_desired_states)):
+            return 'on'
 
-        # if the a/c is triggered to turn on by a zone, prioritize running that zone
-        if trigger_zone is not None:
+        return 'off'
+
+    def determine_zone_switch_states(self, trigger_zone: Zone = None):
+        active_zones = self.active_zones()
+        states = {zone.name: 'off' for zone in active_zones}
+
+        if trigger_zone:
             states[trigger_zone.name] = 'on'
             return states
 
-        groups = self.zone_groups()
-        for index, group in enumerate(groups):
-            # scenario 1: priority zone is running and has not reached desired temp, then keep it running and turn off other zones
-            # scenario 2: priority zone is not running, but still within range, then keep it shut off and run other zones
-            # scenario 3: priority zone is not running, and it's out of range, then turn it on
-            group_state = None
+        desired_temp = self.get_desired_temperature()
+        mode = self.get_mode()
+        trigger_threshold = self.get_trigger_threshold()
+
+        for index, group in enumerate(self.zone_groups()):
+            group_active = False
             for zone in group:
                 if zone.is_running():
-                    if zone.has_reached_desired_temp(self.get_desired_temperature(), mode=self.get_mode()):
-                        states[zone.name] = 'off'
-                    else:
-                        states[zone.name] = 'on'
+                    states[zone.name] = 'off' if zone.has_reached_desired_temp(desired_temp, mode=mode) else 'on'
                 else:
-                    if zone.is_out_of_desired_temp(self.get_desired_temperature(), self.get_trigger_threshold(), mode=self.get_mode()):
-                        states[zone.name] = 'on' # turn the zone back on
-                    else:
-                        states[zone.name] = 'off' # keep it off and let other zones run
+                    states[zone.name] = 'on' if zone.is_out_of_desired_temp(desired_temp, trigger_threshold, mode=mode) else 'off'
 
-                group_state = 'on' if states[zone.name] == 'on' and group_state is None else None
+                group_active = group_active or states[zone.name] == 'on'
 
-            if group_state == 'on' and index < len(groups) - 1:
-                lower_prio_zones = [zone for group in groups[index+1:] for zone in group]
-                for zone in lower_prio_zones:
-                    states[zone.name] = 'off'
+            if group_active:
+                for lower_group in self.zone_groups()[index + 1:]:
+                    for zone in lower_group:
+                        states[zone.name] = 'off'
                 break
 
         return states
@@ -217,8 +210,9 @@ class SwitchesManager:
         if study != None and not self.study_switch.is_state(study):
             self.study_switch.toggle()
 
-        if self.study_switch.is_state('off') and self.kitchen_switch.is_state('off'):
-            return # do nothing with bedroom because it's on anyway
+        self.adapi.run_in(self.toggle_bedroom, 5, bedroom=bedroom) # run the bedroom switch with some delay waiting for state of other switches to be updated
 
+    def toggle_bedroom(self, **kwargs):
+        bedroom = kwargs["bedroom"]
         if bedroom is not None and not self.bedroom_switch.is_state(bedroom):
             self.bedroom_switch.toggle()

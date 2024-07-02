@@ -67,8 +67,8 @@ class TestAirconController(unittest.TestCase):
 
         self.assertEqual(self.mock_hass.determine_power_state(), 'off')
 
-    def test_determine_power_state_with_power_switch_off_and_strategy_at_least_one(self):
-        self.mock_hass.get_power_on_strategy = MagicMock(return_value='at_least_one')
+    def test_determine_power_state_with_power_switch_off_and_strategy_any(self):
+        self.mock_hass.get_power_on_strategy = MagicMock(return_value='any')
         self.mock_hass.power_switch.get_state = MagicMock(return_value='off')
         self.mock_hass.active_zones.return_value = [self.bedroom_zone, self.study_zone]
         self.bedroom_zone.is_out_of_desired_temp = MagicMock(return_value=False)

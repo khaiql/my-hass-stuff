@@ -20,7 +20,7 @@ ac_controller:
 
   desired_temperature_helper_id: desired_temperature_helper_id
   trigger_threshold_helper_id: trigger_theshold_helper_id
-  power_on_strategy: all / at-least-one
+  power_on_strategy: all / any
   power_switch_entity_id: power_entity_id
   mode: heating/cooling
 
