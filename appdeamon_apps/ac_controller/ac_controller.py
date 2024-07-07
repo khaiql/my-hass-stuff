@@ -202,17 +202,22 @@ class SwitchesManager:
         self.kitchen_switch = kitchen_switch
         self.study_switch = study_switch
 
+    def toggle_and_sleep_sequence(self, entity_id, sleep=True):
+        sequence = [{'switch/toggle': {'entity_id': entity_id}}]
+        if sleep:
+            sequence.append({'sleep': 5})
+        return sequence
 
     def update_states(self, bedroom=None, kitchen=None, study=None):
+        sequence = []
         if kitchen != None and not self.kitchen_switch.is_state(kitchen):
-            self.kitchen_switch.toggle()
+            sequence = sequence + self.toggle_and_sleep_sequence(self.kitchen_switch.entity_id)
 
         if study != None and not self.study_switch.is_state(study):
-            self.study_switch.toggle()
+            sequence = sequence + self.toggle_and_sleep_sequence(self.study_switch.entity_id)
 
-        self.adapi.run_in(self.toggle_bedroom, 5, bedroom=bedroom) # run the bedroom switch with some delay waiting for state of other switches to be updated
-
-    def toggle_bedroom(self, **kwargs):
-        bedroom = kwargs["bedroom"]
         if bedroom is not None and not self.bedroom_switch.is_state(bedroom):
-            self.bedroom_switch.toggle()
+            sequence = sequence + self.toggle_and_sleep_sequence(self.bedroom_switch.entity_id, sleep=False)
+
+        self.log(f'running {sequence=}')
+        self.adapi.run_sequence(sequence)

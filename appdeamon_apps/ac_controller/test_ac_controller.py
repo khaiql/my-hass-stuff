@@ -207,5 +207,28 @@ class TestAirconController(unittest.TestCase):
         self.mock_hass.find_trigger_zone.assert_called_once_with('kitchen_switch')
         mock_switches_manager.update_states.assert_called_with(bedroom='off', kitchen='on')
 
+
+class TestSwitchesManager(unittest.TestCase):
+    def setUp(self) -> None:
+        self.ad_api = MagicMock()
+        self.mock_bedroom_switch = MagicMock()
+        self.mock_bedroom_switch.entity_id = 'bedroom_switch_id'
+
+        self.mock_kitchen_switch = MagicMock()
+        self.mock_kitchen_switch.entity_id = 'kitchen_switch_id'
+
+        self.mock_study_switch = MagicMock()
+        self.mock_study_switch.entity_id = 'study_switch_id'
+
+        self.switches_manager = SwitchesManager(self.ad_api, self.mock_bedroom_switch, self.mock_kitchen_switch, self.mock_study_switch)
+
+    def test_update_states(self):
+        self.mock_kitchen_switch.is_state.return_value = False
+        self.mock_bedroom_switch.is_state.return_value = False
+        self.mock_study_switch.is_state.return_value = True
+
+        self.switches_manager.update_states(bedroom='on', kitchen='off', study='on')
+        self.ad_api.run_sequence.assert_called_once_with([{'switch/toggle': {'entity_id': 'kitchen_switch_id'}}, {'sleep': 5}, {'switch/toggle': {'entity_id': 'bedroom_switch_id'}}])
+
 if __name__ == '__main__':
     unittest.main()
