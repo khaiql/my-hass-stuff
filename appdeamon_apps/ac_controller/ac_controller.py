@@ -1,6 +1,7 @@
 import appdaemon.plugins.hass.hassapi as hass
 from itertools import groupby
 from operator import attrgetter
+from appdaemon.exceptions import TimeOutException
 
 SETTING_DELAY_DURATION_SECOND=2
 
@@ -17,38 +18,42 @@ class Zone:
         self.desired_temperature_setting_entity = self.adapi.get_entity(config["desired_temperature_entity_id"]) if "desired_temperature_entity_id" in config else None
         self.threshold_entity = self.adapi.get_entity(config["threshold_entity_id"]) if "threshold_entity_id" in config else None
 
-    def is_ac_controlled(self):
-        return self.zone_state.get_state() == 'on'
+    async def is_ac_controlled(self):
+        return await self.zone_state.is_state('on')
 
-    def is_running(self):
-        return self.fingerbot_switch.is_state('on')
+    async def is_running(self):
+        return await self.fingerbot_switch.is_state('on')
 
-    def get_current_temperature(self):
-        return float(self.temperature_sensor.get_state())
+    async def get_current_temperature(self):
+        return float(await self.temperature_sensor.get_state())
 
-    def get_desired_temperature(self, global_setting=None):
+    async def get_desired_temperature(self, global_setting=None):
         if self.desired_temperature_setting_entity is not None:
-            return float(self.desired_temperature_setting_entity.get_state())
+            return float(await self.desired_temperature_setting_entity.get_state())
         return global_setting
 
-    def get_threshold(self, global_setting=None):
+    async def get_threshold(self, global_setting=None):
         if self.threshold_entity is not None:
-            return float(self.threshold_entity.get_state())
+            return float(await self.threshold_entity.get_state())
         return global_setting
 
-    def has_reached_desired_temp(self, global_desired_temperature, mode='heating'):
-        current_temp = self.get_current_temperature()
+    async def has_reached_desired_temp(self, global_desired_temperature, mode='heating'):
+        current_temp = await self.get_current_temperature()
+        desired_temperature = await self.get_desired_temperature(global_setting=global_desired_temperature)
         if mode == 'heating':
-            return current_temp >= self.get_desired_temperature(global_setting=global_desired_temperature)
+            return current_temp >= desired_temperature
 
-        return current_temp <= self.get_desired_temperature() # cooling mode
+        return current_temp <= desired_temperature # cooling mode
 
-    def is_out_of_desired_temp(self, global_desired_temperature, global_threshold, mode='heating'):
-        current_temp = self.get_current_temperature()
+    async def is_out_of_desired_temp(self, global_desired_temperature, global_threshold, mode='heating'):
+        current_temp = await self.get_current_temperature()
+        desired_temperature = await self.get_desired_temperature(global_setting=global_desired_temperature)
+        threshold = await self.get_threshold(global_setting=global_threshold)
+
         if mode == 'heating':
-            return current_temp < self.get_desired_temperature(global_setting=global_desired_temperature) - self.get_threshold(global_setting=global_threshold)
+            return current_temp < desired_temperature - threshold
 
-        return current_temp > self.get_desired_temperature(global_setting=global_desired_temperature) - self.get_threshold(global_setting=global_threshold)
+        return current_temp > desired_temperature - threshold
 
     def has_entity(self, entity_id):
         return self.temperature_sensor.entity_id == entity_id or self.zone_state.entity_id == entity_id
@@ -65,7 +70,7 @@ class Zone:
         return f"{self.name} priority={self.priority} active={self.is_ac_controlled()} switch_state={self.fingerbot_switch.get_state()} current_temp={self.get_current_temperature()}"
 
 class AirconController(hass.Hass):
-    def initialize(self):
+    async def initialize(self):
         self.desired_temperature_entity = self.get_entity(self.args["desired_temperature_helper_id"])
         self.trigger_threshold_entity = self.get_entity(self.args["trigger_threshold_helper_id"])
         self.power_switch = self.get_entity(self.args["power_switch_entity_id"])
@@ -91,72 +96,73 @@ class AirconController(hass.Hass):
         self.desired_temperature_entity.listen_state(self.smart_control, duration=SETTING_DELAY_DURATION_SECOND)
         self.trigger_threshold_entity.listen_state(self.smart_control, duration=SETTING_DELAY_DURATION_SECOND)
 
-    def get_desired_temperature(self):
-        return float(self.desired_temperature_entity.get_state())
+    async def get_desired_temperature(self):
+        return float(await self.desired_temperature_entity.get_state())
 
-    def get_trigger_threshold(self):
-        return float(self.trigger_threshold_entity.get_state())
+    async def get_trigger_threshold(self):
+        return float(await self.trigger_threshold_entity.get_state())
 
-    def get_mode(self):
-        return self.mode_entity.get_state()
+    async def get_mode(self):
+        return await self.mode_entity.get_state()
 
-    def get_power_on_strategy(self):
-        return self.power_on_strategy_entity.get_state()
+    async def get_power_on_strategy(self):
+        return await self.power_on_strategy_entity.get_state()
 
-    def active_zones(self, sort=False):
-        zones = list(filter(lambda z: z.is_ac_controlled(), self.zones))
+    async def active_zones(self, sort=False):
+        zones = [z for z in self.zones if await z.is_ac_controlled()]
         if sort:
             zones.sort(key=lambda zone: zone.priority)
         return zones
 
-    def zone_groups(self):
-        sorted_zones = self.active_zones(sort=True)
+    async def zone_groups(self):
+        sorted_zones = await self.active_zones(sort=True)
         grouped_zones = groupby(sorted_zones, key=attrgetter('priority'))
         return [list(group) for _, group in grouped_zones]
 
     def find_trigger_zone(self, entity):
         return next((zone for zone in self.zones if zone.has_entity(entity)), None)
 
-    def smart_control(self, entity, attribute, old, new, **kwargs):
+    async def smart_control(self, entity, attribute, old, new, pin_app, **kwargs):
         self.log(f"smart_control callback {entity=} {old=} {new=}")
-        new_state = self.determine_power_state()
+        new_state = await self.determine_power_state()
         self.log(f"power {new_state=}")
         trigger_zone = None
-        if new_state != self.power_switch.get_state():
-            self.power_switch.toggle()
+        if new_state != await self.power_switch.get_state():
+            await self.power_switch.toggle()
             trigger_zone = self.find_trigger_zone(entity) if new_state == 'on' else None
 
         if new_state == 'off':
             return
 
-        zone_states = self.determine_zone_switch_states(trigger_zone)
+        zone_states = await self.determine_zone_switch_states(trigger_zone)
         self.log(f"zones {zone_states=}")
 
         # address an edge case where power remains on but all switches are expected to be off, due to delayed update from sensors
         if set(zone_states.values()) == set(['off']):
-            self.power_switch.toggle()
+            await self.power_switch.toggle()
             return
 
         if zone_states:
-            self.switches_manager.update_states(**zone_states)
+            await self.switches_manager.update_states(**zone_states)
 
 
-    def determine_power_state(self):
-        active_zones = self.active_zones()
+    async def determine_power_state(self):
+        active_zones = await self.active_zones()
 
         if not active_zones:
             self.log("no active zones")
             return 'off'
 
-        desired_temp = self.get_desired_temperature()
-        mode = self.get_mode()
+        desired_temp = await self.get_desired_temperature()
+        mode = await self.get_mode()
+        trigger_threshold = await self.get_trigger_threshold()
 
-        if self.power_switch.get_state() == 'on':
-            return 'off' if all(zone.has_reached_desired_temp(desired_temp, mode=mode) for zone in active_zones) else 'on'
+        if await self.power_switch.get_state() == 'on':
+            return 'off' if all([await zone.has_reached_desired_temp(desired_temp, mode=mode) for zone in active_zones]) else 'on'
 
         # Power switch is off
-        out_of_desired_states = [zone.is_out_of_desired_temp(desired_temp, self.get_trigger_threshold(), mode=mode) for zone in active_zones]
-        power_on_strategy = self.get_power_on_strategy()
+        out_of_desired_states = [await zone.is_out_of_desired_temp(desired_temp, trigger_threshold, mode=mode) for zone in active_zones]
+        power_on_strategy = await self.get_power_on_strategy()
 
         if (power_on_strategy == 'all' and all(out_of_desired_states)) or \
         (power_on_strategy == 'any' and any(out_of_desired_states)):
@@ -164,30 +170,32 @@ class AirconController(hass.Hass):
 
         return 'off'
 
-    def determine_zone_switch_states(self, trigger_zone: Zone = None):
-        active_zones = self.active_zones()
+    async def determine_zone_switch_states(self, trigger_zone: Zone = None):
+        active_zones = await self.active_zones()
         states = {zone.name: 'off' for zone in active_zones}
 
         if trigger_zone:
             states[trigger_zone.name] = 'on'
             return states
 
-        desired_temp = self.get_desired_temperature()
-        mode = self.get_mode()
-        trigger_threshold = self.get_trigger_threshold()
+        desired_temp = await self.get_desired_temperature()
+        mode = await self.get_mode()
+        trigger_threshold = await self.get_trigger_threshold()
 
-        for index, group in enumerate(self.zone_groups()):
+        zone_groups = await self.zone_groups()
+
+        for index, group in enumerate(zone_groups):
             group_active = False
             for zone in group:
-                if zone.is_running():
-                    states[zone.name] = 'off' if zone.has_reached_desired_temp(desired_temp, mode=mode) else 'on'
+                if await zone.is_running():
+                    states[zone.name] = 'off' if await zone.has_reached_desired_temp(desired_temp, mode=mode) else 'on'
                 else:
-                    states[zone.name] = 'on' if zone.is_out_of_desired_temp(desired_temp, trigger_threshold, mode=mode) else 'off'
+                    states[zone.name] = 'on' if await zone.is_out_of_desired_temp(desired_temp, trigger_threshold, mode=mode) else 'off'
 
                 group_active = group_active or states[zone.name] == 'on'
 
             if group_active:
-                for lower_group in self.zone_groups()[index + 1:]:
+                for lower_group in zone_groups[index + 1:]:
                     for zone in lower_group:
                         states[zone.name] = 'off'
                 break
@@ -202,22 +210,19 @@ class SwitchesManager:
         self.kitchen_switch = kitchen_switch
         self.study_switch = study_switch
 
-    def toggle_and_sleep_sequence(self, entity_id, sleep=True):
-        sequence = [{'switch/toggle': {'entity_id': entity_id}}]
-        if sleep:
-            sequence.append({'sleep': 5})
-        return sequence
+    async def update_states(self, bedroom=None, kitchen=None, study=None, ensure_state=True):
+        try:
+            if kitchen != None and not await self.kitchen_switch.is_state(kitchen):
+                await self.kitchen_switch.toggle()
+                await self.kitchen_switch.wait_state(kitchen, timeout=10)
 
-    def update_states(self, bedroom=None, kitchen=None, study=None):
-        sequence = []
-        if kitchen != None and not self.kitchen_switch.is_state(kitchen):
-            sequence = sequence + self.toggle_and_sleep_sequence(self.kitchen_switch.entity_id)
+            if study != None and not await self.study_switch.is_state(study):
+                await self.study_switch.toggle()
+                await self.study_switch.wait_state(study, timeout=10)
 
-        if study != None and not self.study_switch.is_state(study):
-            sequence = sequence + self.toggle_and_sleep_sequence(self.study_switch.entity_id)
+            if bedroom is not None and not await self.bedroom_switch.is_state(bedroom):
+                await self.bedroom_switch.toggle()
+                await self.bedroom_switch.wait_state(bedroom, timeout=10)
 
-        if bedroom is not None and not self.bedroom_switch.is_state(bedroom):
-            sequence = sequence + self.toggle_and_sleep_sequence(self.bedroom_switch.entity_id, sleep=False)
-
-        self.log(f'running {sequence=}')
-        self.adapi.run_sequence(sequence)
+        except TimeOutException:
+            pass # didn't complete on time
