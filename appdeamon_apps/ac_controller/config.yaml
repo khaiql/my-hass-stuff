@@ -1,12 +1,19 @@
+ac_zone:
+  module: ac_zone
+  global: true
+
 ac_controller:
   module: ac_controller
   class: AirconController
+  dependencies:
+    - ac_zone
 
   bedroom:
     temperature_entity_id: b1
     switch_entity_id: 
     state_entity_id: se1
     priority: 1
+    switch_reverse_entity_id:
   kitchen:
     temperature_entity_id: b2
     switch_entity_id: s2
@@ -27,12 +34,16 @@ ac_controller:
 switch_state_manager:
   module: ac_switch_state_manager
   class: ACSwitchStateManager
+  use_dictionary_unpacking: true
+  dependencies:
+    - ac_zone
   bedroom:
-    switch_entity: 1
-    state_entity: 1
+    switch_entity_id: s1
+    state_entity_id: se1
+    switch_reverse_entity_id:
   kitchen:
-    switch_entity: 1
-    state_entity: 1
+    switch_entity_id: s2
+    state_entity_id: se2
   study:
-    switch_entity: 1
-    state_entity: 1
+    switch_entity_id: s3
+    state_entity_id: se3

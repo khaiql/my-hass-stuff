@@ -1,38 +1,34 @@
 import appdaemon.plugins.hass.hassapi as hass
+from ac_zone import Zone
 
 class ACSwitchStateManager(hass.Hass):
-  def initialize(self):
+  async def initialize(self):
+    ad_api = self.get_ad_api()
+    self.bedroom_zone = Zone(ad_api, "bedroom", config=self.args["bedroom"])
+    self.kitchen_zone = Zone(ad_api, "kitchen", config=self.args["kitchen"])
+    self.study_zone = Zone(ad_api, "study", config=self.args["study"])
 
-    self.bedroom_switch = self.get_entity(self.args['bedroom']['switch_entity'])
-    self.bedroom_state = self.get_entity(self.args['bedroom']['state_entity'])
+    self.zones = [self.bedroom_zone, self.kitchen_zone, self.study_zone]
 
-    self.kitchen_switch = self.get_entity(self.args['kitchen']['switch_entity'])
-    self.kitchen_state = self.get_entity(self.args['kitchen']['state_entity'])
+    for zone in self.zones:
+      zone.fingerbot_switch.listen_state(self.switch_state_callback)
 
-    self.study_switch = self.get_entity(self.args['study']['switch_entity'])
-    self.study_state = self.get_entity(self.args['study']['state_entity'])
-
-    self.switches_dict = {
-      self.bedroom_state.entity_id: self.bedroom_switch,
-      self.kitchen_state.entity_id: self.kitchen_switch,
-      self.study_state.entity_id: self.study_switch,
-    }
-
-    for switch in self.switches_dict.values():
-      switch.listen_state(self.switch_state_callback)
-
-    for state in [self.bedroom_state, self.kitchen_state, self.study_state]:
+    for state in [self.bedroom_zone, self.kitchen_zone, self.study_zone]:
       state.listen_state(self.automation_zone_callback)
 
 
-  def switch_state_callback(self, entity, attribute, old, new, **kwargs):
+  async def switch_state_callback(self, entity, attribute, old, new, **kwargs):
     self.log(f"switch_state_callback {entity=} {old=} {new=}")
 
-    if self.kitchen_switch.is_state('off') and self.study_switch.is_state('off') and not self.bedroom_switch.is_state('on'):
-      self.bedroom_switch.set_state(state='on')
+    if await self.kitchen_zone.is_switch_state('off') and await self.study_zone.is_switch_state('off') and not await self.bedroom_zone.is_switch_state('on'):
+      await self.bedroom_zone.revert_switch_state_without_clicking()
 
-  def automation_zone_callback(self, zone_state, attribute, old, new, **kwargs):
-    self.log(f"zone_callback {zone_state=} {old=} {new=}")
-    switch = self.switches_dict[zone_state]
-    if new == 'off' and not switch.is_state('off'):
-      switch.toggle()
+  async def automation_zone_callback(self, zone_state_entity, attribute, old, new, **kwargs):
+    self.log(f"zone_callback {zone_state_entity=} {old=} {new=}")
+    zone = next((zone for zone in self.zones if zone.zone_state.entity_id == zone_state_entity), None)
+    if not zone:
+      self.log(f"zone {zone_state_entity} not found ")
+      return
+
+    if new == 'off' and not zone.is_switch_state('off'):
+      zone.toggle_switch_and_wait_state('off')
