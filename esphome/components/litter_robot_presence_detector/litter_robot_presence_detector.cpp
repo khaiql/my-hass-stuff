@@ -5,7 +5,7 @@
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/schema/schema_generated.h"
-#include "person_detect_model_data.h"
+#include "model_data.h"
 #include <time.h>
 
 #ifdef USE_IMG_CONVERTERS
@@ -119,7 +119,7 @@ bool LitterRobotPresenceDetector::setup_model() {
     return false;
   }
 
-  this->model = ::tflite::GetModel(g_person_detect_model_data);
+  this->model = ::tflite::GetModel(g_model_data);
   if (this->model->version() != TFLITE_SCHEMA_VERSION) {
     ESP_LOGE(TAG,
              "Model provided is schema version %d not equal "
