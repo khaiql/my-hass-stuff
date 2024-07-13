@@ -57,13 +57,20 @@ class AirconController(hass.Hass):
     def find_trigger_zone(self, entity):
         return next((zone for zone in self.zones if zone.has_entity(entity)), None)
 
+    async def toggle_power_switch(self, expected_state: str):
+        await self.power_switch.toggle()
+        try:
+            await self.power_switch.wait_state(expected_state, 10)
+        except TimeOutException:
+            pass
+
     async def smart_control(self, entity, attribute, old, new, pin_app, **kwargs):
         self.log(f"smart_control callback {entity=} {old=} {new=}")
         new_state = await self.determine_power_state()
         self.log(f"power {new_state=}")
         trigger_zone = None
         if new_state != await self.power_switch.get_state():
-            await self.power_switch.toggle()
+            await self.toggle_power_switch(new_state)
             trigger_zone = self.find_trigger_zone(entity) if new_state == 'on' else None
 
         if new_state == 'off':
@@ -74,7 +81,7 @@ class AirconController(hass.Hass):
 
         # address an edge case where power remains on but all switches are expected to be off, due to delayed update from sensors
         if set(zone_states.values()) == set(['off']):
-            await self.power_switch.toggle()
+            await self.toggle_power_switch('off')
             return
 
         if zone_states:

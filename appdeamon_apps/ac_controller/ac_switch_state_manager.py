@@ -23,12 +23,13 @@ class ACSwitchStateManager(hass.Hass):
     if await self.kitchen_zone.is_switch_state('off') and await self.study_zone.is_switch_state('off') and not await self.bedroom_zone.is_switch_state('on'):
       await self.bedroom_zone.revert_switch_state_without_clicking()
 
-  async def automation_zone_callback(self, zone_state_entity, attribute, old, new, **kwargs):
+  async def automation_zone_callback(self, *args, **kwargs):
+    zone_state_entity, old, new = args[0], args[2], args[3]
     self.log(f"zone_callback {zone_state_entity=} {old=} {new=}")
     zone = next((zone for zone in self.zones if zone.zone_state.entity_id == zone_state_entity), None)
     if not zone:
       self.log(f"zone {zone_state_entity} not found ")
       return
 
-    if new == 'off' and not zone.is_switch_state('off'):
-      zone.toggle_switch_and_wait_state('off')
+    if new == 'off' and not await zone.is_switch_state('off'):
+      await zone.toggle_switch_and_wait_state('off')
