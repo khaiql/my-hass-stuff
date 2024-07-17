@@ -5,7 +5,7 @@ class Zone:
         self.adapi = adapi
         self.name = name
 
-        self.priority = int(config["priority"]) if 'priority' in config else None
+        self.priority = int(config["priority"]) if 'priority' in config else 1
         self.temperature_sensor = self.adapi.get_entity(config["temperature_entity_id"]) if "temperature_entity_id" in config else None
         self.fingerbot_switch = self.adapi.get_entity(config["switch_entity_id"]) # Required
         self.zone_state = self.adapi.get_entity(config["state_entity_id"]) # Required

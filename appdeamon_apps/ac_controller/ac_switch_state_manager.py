@@ -17,7 +17,8 @@ class ACSwitchStateManager(hass.Hass):
       state.listen_state(self.automation_zone_callback)
 
 
-  async def switch_state_callback(self, entity, attribute, old, new, **kwargs):
+  async def switch_state_callback(self, *args, **kwargs):
+    entity, old, new = args[0], args[2], args[3]
     self.log(f"switch_state_callback {entity=} {old=} {new=}")
 
     if await self.kitchen_zone.is_switch_state('off') and await self.study_zone.is_switch_state('off') and not await self.bedroom_zone.is_switch_state('on'):
