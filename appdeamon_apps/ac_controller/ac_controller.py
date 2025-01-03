@@ -1,5 +1,7 @@
+from datetime import datetime
 from itertools import groupby
 from operator import attrgetter
+from typing import Optional
 
 import appdaemon.plugins.hass.hassapi as hass
 from appdaemon.exceptions import TimeOutException
@@ -36,20 +38,25 @@ class AirconController(hass.Hass):
         self.power_on_strategy_entity = self.get_entity(
             self.args["power_on_strategy_entity_id"]
         )
+        self.self_fix_toggle = self.get_entity(self.args["self_fix_toggle_entity_id"])
 
         self.bedroom_zone = Zone(
             self.get_ad_api(), "bedroom", config=self.args["bedroom"]
+        )
+        self.baby_bedroom_zone = Zone(
+            self.get_ad_api(), "bedroom", config=self.args["baby_bedroom"]
         )
         self.kitchen_zone = Zone(
             self.get_ad_api(), "kitchen", config=self.args["kitchen"]
         )
         self.study_zone = Zone(self.get_ad_api(), "study", config=self.args["study"])
 
-        self.zones = [self.bedroom_zone, self.kitchen_zone, self.study_zone]
+        self.zones = [self.bedroom_zone, self.baby_bedroom_zone, self.kitchen_zone, self.study_zone]
 
         self.switches_manager = SwitchesManager(
             self.get_ad_api(),
             bedroom_zone=self.bedroom_zone,
+            baby_bedroom_zone=self.baby_bedroom_zone,
             kitchen_zone=self.kitchen_zone,
             study_zone=self.study_zone,
         )
@@ -88,22 +95,26 @@ class AirconController(hass.Hass):
         grouped_zones = groupby(sorted_zones, key=attrgetter("priority"))
         return [list(group) for _, group in grouped_zones]
 
-    def find_trigger_zone(self, entity):
-        return next((zone for zone in self.zones if zone.has_entity(entity)), None)
+    def find_trigger_zone(self, entity) -> Optional[Zone]:
+        zone = next((zone for zone in self.zones if zone.has_entity(entity)), None)
+        if zone:
+            self.log(f"debug trigger_zone={zone.name}")
+        return zone
 
     async def toggle_power_switch(self, expected_state: str):
         await self.power_switch.toggle()
-        try:
-            await self.power_switch.wait_state(expected_state, 10)
-        except TimeOutException:
-            pass
+        await self.sleep(3)
 
     async def should_double_check_power_state(self, entity: str):
-        return entity in [
-            zone.temperature_sensor.entity_id
-            for zone in self.zones
-            if await zone.is_ac_controlled()
-        ]
+        if self.self_fix_toggle.state != 'on':
+            return False
+
+        active_zones = await self.active_zones()
+        if len(active_zones) > 1:
+            return False
+        entities = [zone.temperature_sensor.entity_id for zone in active_zones]
+        self.log(f"{entities=}")
+        return entity in entities
 
     async def smart_control(self, *args, **kwargs):
         entity, old, new = args[0], args[2], args[3]
@@ -115,14 +126,17 @@ class AirconController(hass.Hass):
             self.log("fixed incorrect power state, skip other checks")
             return
 
+        trigger_zone = self.find_trigger_zone(entity)
+        if trigger_zone and not await trigger_zone.is_ac_controlled():
+            return
+
         new_state = await self.determine_power_state()
         self.log(f"power {new_state=}")
 
-        trigger_zone = None
-        if new_state != await self.power_switch.get_state():
+        if new_state != self.power_switch.state:
             await self.toggle_power_switch(new_state)
-            trigger_zone = self.find_trigger_zone(entity) if new_state == "on" else None
-            self.log(f"{trigger_zone=}")
+        else:
+            trigger_zone = None
 
         if new_state == "off":
             return
@@ -144,60 +158,67 @@ class AirconController(hass.Hass):
         if new_value.lower() == "unavailable":
             return False
 
+        power_history = flatten(
+            await self.get_history(entity_id=self.power_switch.entity_id, days=1)
+        )
+        last_power_history = power_history[-1]
+        last_power_history_changed = datetime.fromisoformat(
+            last_power_history["last_changed"]
+        )
+
         temp_sensor_history = flatten(
             await self.get_history(entity_id=temperature_sensor_entity, days=1)
         )
 
-        go_back_steps = 4
+        temperatures_order_by_time_desc = [float(new_value)]
+        for entry in temp_sensor_history[::-1]:
+            last_changed = datetime.fromisoformat(entry["last_changed"])
+            if last_changed < last_power_history_changed:
+                break
+            if entry["state"].lower() != "unavailable":
+                temperatures_order_by_time_desc.append(float(entry["state"]))
 
-        considered_history = temp_sensor_history[
-            len(temp_sensor_history) - go_back_steps :
-        ]
-        temperatures = [
-            float(entry["state"])
-            for entry in considered_history
-            if entry["state"].lower() != "unavailable"
-        ]
-        temperatures.append(float(new_value))
+        if len(temperatures_order_by_time_desc) < 4:  # need at least 4 data points
+            return False
 
-        self.log(
-            f"temperature history of {temperature_sensor_entity} {temperatures=} {go_back_steps=}"
-        )
+        temperatures_order_by_time_asc = temperatures_order_by_time_desc[:4][::-1]
 
-        if await self.is_power_in_wrong_state(temperatures):
+        self.log(f"temperature history of {temperature_sensor_entity} {temperatures_order_by_time_desc=} {temperatures_order_by_time_asc=}")
+
+        if await self.is_power_in_wrong_state(temperatures_order_by_time_asc):
             await self.revert_power_state_to_fix_mqtt_issue()
             return True
         return False
 
-    async def is_power_in_wrong_state(self, temperatures):
+    async def is_power_in_wrong_state(self, temperatures_order_by_time_asc):
         mode = await self.get_mode()
         current_power_state = await self.power_switch.get_state()
         is_wrong = False
         if (
             mode == "heating"
             and current_power_state == "on"
-            and is_decreasing(temperatures)
+            and is_decreasing(temperatures_order_by_time_asc)
         ):
             is_wrong = True
             self.log("detecting power is on but temperature keeps decreasing")
         elif (
             mode == "heating"
             and current_power_state == "off"
-            and is_increasing(temperatures)
+            and is_increasing(temperatures_order_by_time_asc)
         ):
             is_wrong = True
             self.log("detecting power is off but temperature keeps increasing")
         elif (
             mode == "cooling"
             and current_power_state == "on"
-            and is_increasing(temperatures)
+            and is_increasing(temperatures_order_by_time_asc)
         ):
             is_wrong = True
             self.log("detecting power is on but temperature keeps increasing")
         elif (
             mode == "cooling"
             and current_power_state == "off"
-            and is_decreasing(temperatures)
+            and is_decreasing(temperatures_order_by_time_asc)
         ):
             is_wrong = True
             self.log("detecting power is off but temperature keeps decreasing")
@@ -220,6 +241,9 @@ class AirconController(hass.Hass):
             self.log("no active zones")
             return "off"
 
+        active_zone_names = [zone.name for zone in active_zones]
+        self.log(f"determine_power_state {active_zone_names=}")
+
         desired_temp = await self.get_desired_temperature()
         mode = await self.get_mode()
         trigger_threshold = await self.get_trigger_threshold()
@@ -229,7 +253,7 @@ class AirconController(hass.Hass):
                 "off"
                 if all(
                     [
-                        await zone.has_reached_desired_temp(desired_temp, mode=mode)
+                        await zone.has_reached_desired_temp(global_desired_temperature=desired_temp, mode=mode)
                         for zone in active_zones
                     ]
                 )
@@ -239,11 +263,12 @@ class AirconController(hass.Hass):
         # Power switch is off
         out_of_desired_states = [
             await zone.is_out_of_desired_temp(
-                desired_temp, trigger_threshold, mode=mode
+                global_desired_temperature=desired_temp, global_threshold=trigger_threshold, mode=mode
             )
             for zone in active_zones
         ]
         power_on_strategy = await self.get_power_on_strategy()
+        self.log(f"determine_power_state {out_of_desired_states=} {power_on_strategy=}")
 
         if (power_on_strategy == "all" and all(out_of_desired_states)) or (
             power_on_strategy == "any" and any(out_of_desired_states)
@@ -252,7 +277,7 @@ class AirconController(hass.Hass):
 
         return "off"
 
-    async def determine_zone_switch_states(self, trigger_zone: Zone | None = None):
+    async def determine_zone_switch_states(self, trigger_zone: Optional[Zone] = None):
         active_zones = await self.active_zones()
         states = {zone.name: "off" for zone in active_zones}
 
@@ -296,24 +321,24 @@ class AirconController(hass.Hass):
 
 
 class SwitchesManager:
-    def __init__(self, adapi, bedroom_zone: Zone, kitchen_zone: Zone, study_zone: Zone):
+    def __init__(self, adapi, bedroom_zone: Zone, baby_bedroom_zone: Zone, kitchen_zone: Zone, study_zone: Zone):
         self.adapi = adapi
         self.bedroom_zone = bedroom_zone
+        self.baby_bedroom_zone = baby_bedroom_zone
         self.kitchen_zone = kitchen_zone
         self.study_zone = study_zone
 
     async def update_states(self, bedroom=None, kitchen=None, study=None):
         try:
-            if kitchen != None and not await self.kitchen_zone.is_switch_state(kitchen):
+            if kitchen and not await self.kitchen_zone.is_switch_state(kitchen):
                 await self.kitchen_zone.toggle_switch_and_wait_state(kitchen)
 
-            if study != None and not await self.study_zone.is_switch_state(study):
+            if study and not await self.study_zone.is_switch_state(study):
                 await self.study_zone.toggle_switch_and_wait_state(study)
 
-            if bedroom is not None and not await self.bedroom_zone.is_switch_state(
-                bedroom
-            ):
-                await self.bedroom_zone.toggle_switch_and_wait_state(bedroom)
+            if bedroom and (not await self.bedroom_zone.is_switch_state(bedroom) or not await
+                            self.baby_bedroom_zone.is_switch_state(bedroom)):
+                await self.bedroom_zone.toggle_switch_and_wait_state(bedroom) # both bedrooms share the same switch
 
         except TimeOutException:
             pass  # didn't complete on time

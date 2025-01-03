@@ -30,6 +30,7 @@ ac_controller:
   power_on_strategy: all / any
   power_switch_entity_id: power_entity_id
   mode: heating/cooling
+  self_fix_toggle_entity_id: self_fix_toggle_entity_id
 
 switch_state_manager:
   module: ac_switch_state_manager

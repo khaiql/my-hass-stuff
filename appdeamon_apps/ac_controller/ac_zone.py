@@ -49,10 +49,12 @@ class Zone:
         desired_temperature = await self.get_desired_temperature(global_setting=global_desired_temperature)
         threshold = await self.get_threshold(global_setting=global_threshold)
 
+        print(f"is_out_of_desired_temp zone={self.name} {current_temp=} {desired_temperature=} {threshold=} {mode=}")
+
         if mode == 'heating':
             return current_temp < desired_temperature - threshold
 
-        return current_temp > desired_temperature - threshold
+        return current_temp > desired_temperature + threshold
 
     async def revert_switch_state_without_clicking(self):
         if self.fingerbot_switch_reverse:
@@ -66,7 +68,7 @@ class Zone:
         await self.fingerbot_switch.wait_state(expected_state, timeout=timeout)
 
     def has_entity(self, entity_id):
-        return self.temperature_sensor.entity_id == entity_id or self.zone_state.entity_id == entity_id if self.temperature_sensor else None
+        return entity_id in [self.temperature_sensor.entity_id, self.zone_state.entity_id]
 
     def listen_state(self, callback):
         self.zone_state.listen_state(callback)
