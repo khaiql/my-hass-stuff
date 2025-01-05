@@ -9,11 +9,7 @@
 #include <time.h>
 #include <string>
 
-#ifdef USE_IMG_CONVERTERS
-#include "img_converters.h"
-#else
 #include "jpeg_decoder.h"
-#endif
 
 namespace esphome {
 namespace litter_robot_presence_detector {
@@ -75,14 +71,6 @@ bool LitterRobotPresenceDetector::register_preprocessor_ops(tflite::MicroMutable
 }
 
 bool LitterRobotPresenceDetector::decode_jpg(camera_fb_t *rb) {
-#ifdef USE_IMG_CONVERTERS
-  if (!fmt2rgb888(rb->buf, rb->len, PIXFORMAT_RGB888, this->input_buffer)) {
-    ESP_LOGE(TAG, "cant decode to rgb");
-    return false;
-  }
-
-  ESP_LOGD(TAG, "decoded to jpg");
-#else
   esp_jpeg_image_cfg_t jpeg_cfg = {.indata = (uint8_t *) rb->buf,
                                    .indata_size = rb->len,
                                    .outbuf = this->input_buffer,
@@ -100,8 +88,6 @@ bool LitterRobotPresenceDetector::decode_jpg(camera_fb_t *rb) {
   }
 
   ESP_LOGD(TAG, "out img width=%d height=%d", outimg.width, outimg.height);
-#endif
-
   return true;
 }
 
@@ -233,7 +219,7 @@ std::shared_ptr<esphome::esp32_camera::CameraImage> LitterRobotPresenceDetector:
 
   if (!image) {
     // retry as we might still be fetching image
-    xSemaphoreTake(this->semaphore_, 100);
+    xSemaphoreTake(this->semaphore_, 30);
     image.swap(this->image_);
   }
 
@@ -305,7 +291,8 @@ int LitterRobotPresenceDetector::decide_state(int max_index) {
   new_values[max_index] = 1;
 
   for (int i = 0; i < 3; ++i) {
-    this->current_predictions[i] = this->ema_alpha * new_values[i] + (1 - this->ema_alpha) * this->current_predictions[i];
+    this->current_predictions[i] =
+        this->ema_alpha * new_values[i] + (1 - this->ema_alpha) * this->current_predictions[i];
   }
 
   // Determine the class with the highest EMA value

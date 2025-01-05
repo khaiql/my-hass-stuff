@@ -20,8 +20,6 @@
 namespace esphome {
 namespace litter_robot_presence_detector {
 
-constexpr uint8_t CAT_DETECTED_INDEX = 1;
-constexpr uint8_t EMPTY_INDEX = 0;
 constexpr size_t PREDICTION_HISTORY_SIZE = 7;
 static std::string CLASSES[] = {"empty", "nachi", "ngao"};
 
