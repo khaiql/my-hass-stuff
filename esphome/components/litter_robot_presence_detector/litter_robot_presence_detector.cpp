@@ -7,6 +7,7 @@
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "model_data.h"
 #include <time.h>
+#include <string>
 
 #ifdef USE_IMG_CONVERTERS
 #include "img_converters.h"
@@ -124,7 +125,7 @@ bool LitterRobotPresenceDetector::setup_model() {
     ESP_LOGE(TAG,
              "Model provided is schema version %d not equal "
              "to supported version %d.\n",
-             model->version(), TFLITE_SCHEMA_VERSION);
+             this->model->version(), TFLITE_SCHEMA_VERSION);
     return false;
   }
 
@@ -196,9 +197,12 @@ void LitterRobotPresenceDetector::loop() {
   if (!this->start_infer(image)) {
     ESP_LOGE(TAG, "infer failed");
   } else {
-    bool detected = this->get_prediction_result();
-    ESP_LOGI(TAG, "predicted class %s", detected ? "true" : "false");
-    this->publish_state(detected);
+    int prediction_index = this->get_prediction_result();
+    int index_to_update = this->decide_state(prediction_index);
+    std::string state_to_update = CLASSES[index_to_update];
+    ESP_LOGI(TAG, "predicted class %s. Final state to update: %s", CLASSES[prediction_index].c_str(),
+             state_to_update.c_str());
+    this->publish_state(state_to_update);
   }
 }
 
@@ -252,32 +256,67 @@ bool LitterRobotPresenceDetector::start_infer(std::shared_ptr<esphome::esp32_cam
   return invokeStatus == kTfLiteOk;
 }
 
-bool LitterRobotPresenceDetector::get_prediction_result() {
+int LitterRobotPresenceDetector::get_prediction_result() {
   TfLiteTensor *output = this->interpreter->output(0);
 
   auto empty_score = output->data.uint8[0];
-  auto cat_detected_score = output->data.uint8[1];
-  ESP_LOGD(TAG, "empty score=%d cat_detected score=%d", empty_score, cat_detected_score);
+  auto nachi_score = output->data.uint8[1];
+  auto ngao_score = output->data.uint8[2];
+  ESP_LOGD(TAG, "empty_score=%d nachi_score=%d ngao_score=%d", empty_score, nachi_score, ngao_score);
 
+  uint8_t scores[] = {empty_score, nachi_score, ngao_score};
+  int max_index = 0;
+  for (int i = 1; i < 3; ++i) {
+    if (scores[i] > scores[max_index]) {
+      max_index = i;
+    }
+  }
+
+  return max_index;
+}
+
+int LitterRobotPresenceDetector::decide_state(int max_index) {
 #ifndef USE_EMA
-  bool is_detected = cat_detected_score > empty_score;
-
-  this->prediction_history[this->last_index] = is_detected ? 1 : 0;
+  // Update prediction history for each class
+  this->prediction_history[this->last_index] = max_index;
   this->last_index += 1;
   if (this->last_index == PREDICTION_HISTORY_SIZE) {
     this->last_index = 0;
   }
 
-  uint8_t sum = 0;
+  // Calculate the average score for each class
+  uint8_t class_counts[3] = {0};
   for (int i = 0; i < PREDICTION_HISTORY_SIZE; i++) {
-    sum += this->prediction_history[i];
+    class_counts[this->prediction_history[i]] += 1;
   }
-  float avg = sum / static_cast<float>(PREDICTION_HISTORY_SIZE);
-  return avg >= 0.5;
+
+  // Determine the class with the highest average score
+  int max_class_index = 0;
+  for (int i = 1; i < 3; ++i) {
+    if (class_counts[i] > class_counts[max_class_index]) {
+      max_class_index = i;
+    }
+  }
+
+  return max_class_index;
 #else
-  double new_value = cat_detected_score > empty_score ? 1 : 0;
-  this->current_prediction = this->ema_alpha * new_value + (1 - this->ema_alpha) * this->current_prediction;
-  return this->current_prediction >= 0.5;
+  // Update EMA for each class
+  double new_values[3] = {0};
+  new_values[max_index] = 1;
+
+  for (int i = 0; i < 3; ++i) {
+    this->current_predictions[i] = this->ema_alpha * new_values[i] + (1 - this->ema_alpha) * this->current_predictions[i];
+  }
+
+  // Determine the class with the highest EMA value
+  int max_class_index = 0;
+  for (int i = 1; i < 3; ++i) {
+    if (this->current_predictions[i] > this->current_predictions[max_class_index]) {
+      max_class_index = i;
+    }
+  }
+
+  return max_class_index;
 #endif
 }
 }  // namespace litter_robot_presence_detector
