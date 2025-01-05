@@ -249,7 +249,7 @@ bool LitterRobotPresenceDetector::start_infer(std::shared_ptr<esphome::esp32_cam
     return false;
   }
 
-  esp_memcpy(input->data.uint8, this->input_buffer, bytes_to_copy);
+  memcpy(input->data.uint8, this->input_buffer, bytes_to_copy);
   TfLiteStatus invokeStatus = this->interpreter->Invoke();
   ESP_LOGD(TAG, " Inference Latency=%u ms", (millis() - prior_invoke));
   return invokeStatus == kTfLiteOk;
