@@ -200,7 +200,8 @@ void LitterRobotPresenceDetector::loop() {
     int prediction_index = this->get_prediction_result();
     int index_to_update = this->decide_state(prediction_index);
     std::string state_to_update = CLASSES[index_to_update];
-    ESP_LOGI(TAG, "predicted class %s. Final state to update: %s", CLASSES[prediction_index], state_to_update);
+    ESP_LOGI(TAG, "predicted class %s. Final state to update: %s", CLASSES[prediction_index].c_str(),
+             state_to_update.c_str());
     this->publish_state(state_to_update);
   }
 }
