@@ -15,7 +15,7 @@ namespace esphome {
 namespace litter_robot_presence_detector {
 
 static const char *const TAG = "litter_robot_presence_detector";
-static const uint32_t MODEL_ARENA_SIZE = 100 * 1024;
+static const uint32_t MODEL_ARENA_SIZE = 200 * 1024;
 static const uint32_t INPUT_BUFFER_SIZE = 155 * 176 * 3 * sizeof(uint8_t);
 
 float LitterRobotPresenceDetector::get_setup_priority() const { return setup_priority::AFTER_CONNECTION; }
