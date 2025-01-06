@@ -227,6 +227,7 @@ std::shared_ptr<esphome::esp32_camera::CameraImage> LitterRobotPresenceDetector:
 }
 bool LitterRobotPresenceDetector::start_infer(std::shared_ptr<esphome::esp32_camera::CameraImage> image) {
   camera_fb_t *rb = image->get_raw_buffer();
+  ESP_LOGD(TAG, " Received image size width=%d height=%d", rb->width, rb->height);
 
   TfLiteTensor *input = this->interpreter->input(0);
   size_t bytes_to_copy = input->bytes;
