@@ -272,7 +272,6 @@ void LitterRobotPresenceDetector::debug_inference() {
     TfLiteTensor *output = this->interpreter->output(0);
 
     // Memory status
-    ESP_LOGD(TAG, "Free heap: %d", ESP.getFreeHeap());
     ESP_LOGD(TAG, "Arena used: %d", interpreter->arena_used_bytes());
 
     // Model info
