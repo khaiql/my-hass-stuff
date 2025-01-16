@@ -57,6 +57,7 @@ class LitterRobotPresenceDetector : public Component, public text_sensor::TextSe
   int get_prediction_result();
   int decide_state(int max_index);
   bool decode_jpg(camera_fb_t *rb);
+  void debug_inference();
 };
 }  // namespace litter_robot_presence_detector
 }  // namespace esphome

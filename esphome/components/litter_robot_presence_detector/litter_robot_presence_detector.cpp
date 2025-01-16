@@ -189,6 +189,7 @@ void LitterRobotPresenceDetector::loop() {
     ESP_LOGI(TAG, "predicted class %s. Final state to update: %s", CLASSES[prediction_index].c_str(),
              state_to_update.c_str());
     this->publish_state(state_to_update);
+    memset(this->input_buffer, 0, INPUT_BUFFER_SIZE);
   }
 }
 
@@ -240,6 +241,7 @@ bool LitterRobotPresenceDetector::start_infer(std::shared_ptr<esphome::esp32_cam
   memcpy(input->data.uint8, this->input_buffer, bytes_to_copy);
   TfLiteStatus invokeStatus = this->interpreter->Invoke();
   ESP_LOGD(TAG, " Inference Latency=%u ms", (millis() - prior_invoke));
+  this->debug_inference();
   return invokeStatus == kTfLiteOk;
 }
 
@@ -260,6 +262,37 @@ int LitterRobotPresenceDetector::get_prediction_result() {
   }
 
   return max_index;
+}
+
+
+void LitterRobotPresenceDetector::debug_inference() {
+    ESP_LOGD(TAG, "=== Debug Information ===");
+
+    TfLiteTensor *input = this->interpreter->input(0);
+    TfLiteTensor *output = this->interpreter->output(0);
+
+    // Memory status
+    ESP_LOGD(TAG, "Free heap: %d", ESP.getFreeHeap());
+    ESP_LOGD(TAG, "Arena used: %d", interpreter->arena_used_bytes());
+
+    // Model info
+    ESP_LOGD(TAG, "Input dims: %d x %d x %d x %d",
+        input->dims->data[0], input->dims->data[1],
+        input->dims->data[2], input->dims->data[3]);
+
+    // Input data sample
+    ESP_LOGD(TAG, "Input data sample:");
+    for (int i = 0; i < 10; i++) {
+        ESP_LOGD(TAG, "%d ", input->data.uint8[i]);
+    }
+
+    // Output data
+    ESP_LOGD(TAG, "Output data:");
+    for (int i = 0; i < output->dims->data[1]; i++) {
+        ESP_LOGD(TAG, "Class %d: %d", i, output->data.uint8[i]);
+    }
+
+    ESP_LOGD(TAG, "=====================");
 }
 
 int LitterRobotPresenceDetector::decide_state(int max_index) {
