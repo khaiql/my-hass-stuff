@@ -1,0 +1,56 @@
+blueprint:
+  name: Open Damper Automation
+  description: Open the damper when turning on air conditioning zone
+  domain: automation
+  source_url: https://github.com/your-username/my-hass-stuff
+  input:
+    climate_entities:
+      name: Climate Entities
+      description: The climate entities to open the damper
+      selector:
+        entity:
+          filter:
+            integration: airtouch
+            domain: climate
+            device_class: zone
+          multiple: true
+
+triggers:
+  - platform: state
+    entity_id: !input climate_entities
+    attribute: fan_mode
+    from: "off"
+    to: "on"
+action:
+  - variables:
+      trigger_entity: "{{ trigger.entity_id }}"
+      current_temp: "{{ state_attr(trigger_entity, 'current_temperature') | float(0) }}"
+      target_temp: "{{ state_attr(trigger_entity, 'temperature') | float(0) }}"
+      temp_difference: "{{ current_temp - target_temp }}"
+  - service: cover.set_cover_position
+    target:
+      entity_id: >
+        {% set entity_name = trigger_entity | replace('climate.', '') %}
+        {% if states('cover.' + entity_name) != 'unknown' %}
+          cover.{{ entity_name }}
+        {% elif states('cover.' + entity_name + '_damper') != 'unknown' %}
+          cover.{{ entity_name }}_damper
+        {% else %}
+          {% set parts = entity_name.split('_') %}
+          {% set last_part = parts[-1] %}
+          {% if last_part.isdigit() and parts|length > 1 %}
+            {% set base_name = '_'.join(parts[:-1]) %}
+            cover.{{ base_name }}_damper_{{ last_part }}
+          {% else %}
+            cover.{{ entity_name }}_damper
+          {% endif %}
+        {% endif %}
+    data:
+      position: >
+        {% if temp_difference >= 1.5 %}
+          100
+        {% elif temp_difference >= 1 %}
+          80
+        {% else %}
+          50
+        {% endif %}
