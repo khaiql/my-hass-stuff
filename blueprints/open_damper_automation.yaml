@@ -14,6 +14,12 @@ blueprint:
             domain: climate
             device_class: zone
           multiple: true
+    delay:
+      name: Delay
+      description: Delay after which a zone set to damper control will be reset to temperature control.
+      default: 30
+      selector:
+        duration:
 
 triggers:
   - platform: state
@@ -54,3 +60,9 @@ action:
         {% else %}
           50
         {% endif %}
+  - delay: !input delay
+  - service: climate.set_temperature
+    target:
+      entity_id: "{{ trigger_entity }}"
+    data:
+      temperature: "{{ target_temp }}"
