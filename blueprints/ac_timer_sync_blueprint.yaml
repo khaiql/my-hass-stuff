@@ -1,0 +1,84 @@
+blueprint:
+  name: AC Timer Synchronization
+  description: Synchronizes a Home Assistant timer with an Airtouch AC timer
+  domain: automation
+  input:
+    timer_entity:
+      name: Timer Entity
+      description: Home Assistant timer entity to synchronize with AC
+      selector:
+        entity:
+          domain: timer
+    ac_device:
+      name: Air Conditioner Device
+      description: The Air Conditioner device to control
+      selector:
+        device:
+          integration: airtouch
+
+# Trigger when the timer entity changes state
+trigger:
+  - platform: event
+    event_type: timer.started
+    event_data:
+      entity_id: !input timer_entity
+  - platform: event
+    event_type: timer.paused
+    event_data:
+      entity_id: !input timer_entity
+  - platform: event
+    event_type: timer.cancelled
+    event_data:
+      entity_id: !input timer_entity
+  - platform: event
+    event_type: timer.finished
+    event_data:
+      entity_id: !input timer_entity
+  - platform: event
+    event_type: timer.restarted
+    event_data:
+      entity_id: !input timer_entity
+
+# Actions based on the timer's state
+action:
+  - choose:
+      # When timer starts
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.event.event_type == 'timer.started' }}"
+        sequence:
+          - service: airtouch.set_timer_from_delay
+            target:
+              device_id: !input ac_device
+            data:
+              delay:
+                hours: "{{ states(trigger.event.data.entity_id).split(':')[0] | int }}"
+                minutes: "{{ states(trigger.event.data.entity_id).split(':')[1] | int }}"
+                seconds: "{{ states(trigger.event.data.entity_id).split(':')[2] | int }}"
+
+      # When timer is paused or cancelled or finished
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.event.event_type in ['timer.paused', 'timer.cancelled', 'timer.finished'] }}"
+        sequence:
+          - service: airtouch.clear_timer
+            target:
+              device_id: !input ac_device
+            data: {}
+
+      # When timer is restarted (resumed)
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.event.event_type == 'timer.restarted' }}"
+        sequence:
+          - service: airtouch.set_timer_from_delay
+            target:
+              device_id: !input ac_device
+            data:
+              delay:
+                hours: "{{ states(trigger.event.data.entity_id).split(':')[0] | int }}"
+                minutes: "{{ states(trigger.event.data.entity_id).split(':')[1] | int }}"
+                seconds: "{{ states(trigger.event.data.entity_id).split(':')[2] | int }}"
+
+# Run mode is single to prevent overlaps
+mode: single
