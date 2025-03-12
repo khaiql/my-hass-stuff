@@ -31,10 +31,6 @@ trigger:
     event_data:
       entity_id: !input timer_entity
   - platform: event
-    event_type: timer.finished
-    event_data:
-      entity_id: !input timer_entity
-  - platform: event
     event_type: timer.restarted
     event_data:
       entity_id: !input timer_entity
@@ -56,10 +52,10 @@ action:
                 minutes: "{{ state_attr(trigger.event.data.entity_id, 'duration').split(':')[1] | int }}"
                 seconds: "{{ state_attr(trigger.event.data.entity_id, 'duration').split(':')[2] | int }}"
 
-      # When timer is paused or cancelled or finished
+      # When timer is paused or cancelled
       - conditions:
           - condition: template
-            value_template: "{{ trigger.event.event_type in ['timer.paused', 'timer.cancelled', 'timer.finished'] }}"
+            value_template: "{{ trigger.event.event_type in ['timer.paused', 'timer.cancelled'] }}"
         sequence:
           - service: airtouch.clear_timer
             target:
