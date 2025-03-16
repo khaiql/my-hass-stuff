@@ -36,9 +36,12 @@ blueprint:
 trigger:
   - platform: state
     entity_id: !input climate_entity
-  - platform: numeric_state
+  - platform: state
     entity_id: !input climate_entity
     attribute: current_temperature
+  - platform: state  # Trigger when temperature setpoint changes
+    entity_id: !input climate_entity
+    attribute: temperature
 
 variables:
   climate_entity: !input climate_entity
