@@ -1,0 +1,103 @@
+blueprint:
+  name: HVAC Mode Auto-Switcher
+  description: >
+    Automatically switches HVAC mode when temperature setpoint is reached,
+    and switches back when temperature deviates beyond a threshold.
+  domain: automation
+  input:
+    climate_entity:
+      name: Climate Device
+      description: The climate device to control
+      selector:
+        entity:
+          filter:
+            integration: airtouch
+            domain: climate
+    target_hvac_mode:
+      name: Target HVAC Mode
+      description: The HVAC mode to switch to when setpoint is reached
+      selector:
+        select:
+          options:
+            - "off"
+            - fan_only
+            - dry
+    temperature_threshold:
+      name: Temperature Threshold
+      description: Temperature deviation threshold to switch back to original mode (in °C)
+      default: 1.0
+      selector:
+        number:
+          min: 0.1
+          max: 5.0
+          step: 0.1
+          unit_of_measurement: °C
+
+trigger:
+  - platform: state
+    entity_id: !input climate_entity
+  - platform: numeric_state
+    entity_id: !input climate_entity
+    attribute: current_temperature
+
+variables:
+  climate_entity: !input climate_entity
+  target_mode: !input target_hvac_mode
+  threshold: !input temperature_threshold
+  current_mode: "{{ state_attr(climate_entity, 'hvac_mode') }}"
+  current_temp: "{{ state_attr(climate_entity, 'current_temperature') }}"
+  target_temp: "{{ state_attr(climate_entity, 'temperature') }}"
+
+condition:
+  - condition: template
+    value_template: "{{ current_mode in ['cool', 'heat', target_mode] }}"
+
+action:
+  - choose:
+      # When in cooling mode and setpoint is reached (switch to target mode)
+      - conditions:
+          - condition: template
+            value_template: "{{ current_mode == 'cool' and current_temp <= target_temp }}"
+        sequence:
+          - service: airtouch.set_hvac_mode_only
+            target:
+              entity_id: !input climate_entity
+            data:
+              hvac_mode: "{{ target_mode }}"
+
+      # When in heating mode and setpoint is reached (switch to target mode)
+      - conditions:
+          - condition: template
+            value_template: "{{ current_mode == 'heat' and current_temp >= target_temp }}"
+        sequence:
+          - service: airtouch.set_hvac_mode_only
+            target:
+              entity_id: !input climate_entity
+            data:
+              hvac_mode: "{{ target_mode }}"
+
+      # When in target mode and temperature is too high (switch to cooling)
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ current_mode == target_mode and
+                 current_temp >= (target_temp + threshold) }}
+        sequence:
+          - service: airtouch.set_hvac_mode_only
+            target:
+              entity_id: !input climate_entity
+            data:
+              hvac_mode: cool
+
+      # When in target mode and temperature is too low (switch to heating)
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ current_mode == target_mode and
+                 current_temp <= (target_temp - threshold) }}
+        sequence:
+          - service: airtouch.set_hvac_mode_only
+            target:
+              entity_id: !input climate_entity
+            data:
+              hvac_mode: heat
