@@ -17,7 +17,6 @@ class ZoneState:
     """Represents the current state of a zone"""
     entity_id: str
     damper_entity: str
-    temp_sensor: str
     current_temp: float
     target_temp: float
     is_active: bool
@@ -59,6 +58,7 @@ class SmartAirconController(hass.Hass):
         self.zones: Dict[str, ZoneState] = {}
         self.current_hvac_mode: Optional[str] = None
         self.algorithm_active: bool = False
+        self.algorithm_mode: Optional[HVACMode] = None
         self.last_check_time: Optional[datetime.datetime] = None
         
         # Load zone configurations
@@ -71,6 +71,9 @@ class SmartAirconController(hass.Hass):
                 datetime.datetime.now() + datetime.timedelta(seconds=10),
                 self.config.check_interval
             )
+        
+        # Schedule entity validation after Home Assistant has time to fully load
+        self.run_in(self._validate_entities, 30)
         
         self.log(f"Smart Aircon Controller initialized with {len(self.zones)} zones")
 
@@ -95,28 +98,26 @@ class SmartAirconController(hass.Hass):
         
         for zone_name, zone_config in zones_config.items():
             try:
-                # Validate required entities exist
+                # Get required entities
                 climate_entity = zone_config["climate_entity"]
                 damper_entity = zone_config["damper_entity"]
-                temp_sensor = zone_config["temp_sensor"]
                 
-                if not self._entity_exists(climate_entity):
-                    self.log(f"Warning: Climate entity {climate_entity} not found", level="WARNING")
-                    continue
-                    
-                if not self._entity_exists(damper_entity):
-                    self.log(f"Warning: Damper entity {damper_entity} not found", level="WARNING")
-                    continue
-                    
-                if not self._entity_exists(temp_sensor):
-                    self.log(f"Warning: Temperature sensor {temp_sensor} not found", level="WARNING")
-                    continue
+                # Check entities exist, but don't skip zones during startup
+                # Entity checks during startup can be unreliable
+                climate_exists = self._entity_exists(climate_entity)
+                damper_exists = self._entity_exists(damper_entity)
                 
-                # Create zone state
+                if not climate_exists:
+                    self.log(f"Warning: Climate entity {climate_entity} not found during startup - will retry later", level="WARNING")
+                    
+                if not damper_exists:
+                    self.log(f"Warning: Damper entity {damper_entity} not found during startup - will retry later", level="WARNING")
+                
+                # Create zone state even if entities aren't found yet
+                # They may become available after Home Assistant fully loads
                 zone_state = ZoneState(
                     entity_id=climate_entity,
                     damper_entity=damper_entity,
-                    temp_sensor=temp_sensor,
                     current_temp=0.0,
                     target_temp=0.0,
                     is_active=False,
@@ -124,7 +125,7 @@ class SmartAirconController(hass.Hass):
                 )
                 
                 self.zones[zone_name] = zone_state
-                self.log(f"Initialized zone: {zone_name}")
+                self.log(f"Initialized zone: {zone_name} (entities available: climate={climate_exists}, damper={damper_exists})")
                 
             except KeyError as e:
                 self.log(f"Error initializing zone {zone_name}: Missing config {e}", level="ERROR")
@@ -135,9 +136,44 @@ class SmartAirconController(hass.Hass):
         """Check if an entity exists in Home Assistant"""
         try:
             state = self.get_state(entity_id)
-            return state is not None
-        except:
+            # Entity exists if state is not None and not "unavailable"
+            # During startup, entities might be "unavailable" temporarily
+            return state is not None and state != "unavailable"
+        except Exception as e:
+            self.log(f"Error checking entity {entity_id}: {e}", level="DEBUG")
             return False
+
+    def _validate_entities(self, kwargs):
+        """Validate all entities after Home Assistant has fully loaded"""
+        self.log("Validating entities after startup...")
+        
+        # Check main climate entity
+        if not self._entity_exists(self.config.main_climate):
+            self.log(f"ERROR: Main climate entity {self.config.main_climate} not found!", level="ERROR")
+        else:
+            self.log(f"Main climate entity {self.config.main_climate} validated")
+        
+        # Check all zone entities
+        missing_entities = []
+        for zone_name, zone in self.zones.items():
+            climate_exists = self._entity_exists(zone.entity_id)
+            damper_exists = self._entity_exists(zone.damper_entity)
+            
+            if not climate_exists:
+                missing_entities.append(f"{zone_name}: {zone.entity_id}")
+            if not damper_exists:
+                missing_entities.append(f"{zone_name}: {zone.damper_entity}")
+                
+            if climate_exists and damper_exists:
+                self.log(f"Zone {zone_name}: All entities validated")
+            else:
+                self.log(f"Zone {zone_name}: Missing entities - climate={climate_exists}, damper={damper_exists}", level="WARNING")
+        
+        if missing_entities:
+            self.log(f"The following entities are still missing after startup: {missing_entities}", level="ERROR")
+            self.log("Please check your Home Assistant configuration and entity names", level="ERROR")
+        else:
+            self.log("All entities validated successfully!")
 
     def _periodic_check(self, kwargs):
         """Periodic check function called every check_interval seconds"""
@@ -148,15 +184,30 @@ class SmartAirconController(hass.Hass):
             self.last_check_time = datetime.datetime.now()
             self._update_zone_states()
             
-            # Check if algorithm should trigger
-            zones_needing_action = self._analyze_zones()
-            
-            if zones_needing_action:
-                self._execute_smart_algorithm(zones_needing_action)
-            elif self.algorithm_active:
-                # Check if we should deactivate
+            zones_needing_heating, zones_needing_cooling = self._analyze_zones()
+
+            # If algorithm is already running, it must complete its cycle before switching.
+            if self.algorithm_active:
                 if self._all_zones_satisfied():
+                    self.log("Current cycle complete.")
                     self._deactivate_algorithm()
+                # If cycle isn't complete, we might re-evaluate dampers, but we don't switch modes.
+                # The _execute call will recalculate and apply damper positions.
+                elif self.algorithm_mode == HVACMode.HEAT and zones_needing_heating:
+                    self.log("Heating cycle continues. Re-evaluating damper positions.")
+                    self._execute_smart_algorithm(zones_needing_heating, HVACMode.HEAT)
+                elif self.algorithm_mode == HVACMode.COOL and zones_needing_cooling:
+                    self.log("Cooling cycle continues. Re-evaluating damper positions.")
+                    self._execute_smart_algorithm(zones_needing_cooling, HVACMode.COOL)
+                return
+
+            # If algorithm is NOT active, decide which mode to start, if any.
+            if zones_needing_heating:
+                if zones_needing_cooling:
+                    self.log("Conflict: Zones need both heating and cooling. Prioritizing heating.", level="WARNING")
+                self._execute_smart_algorithm(zones_needing_heating, HVACMode.HEAT)
+            elif zones_needing_cooling:
+                self._execute_smart_algorithm(zones_needing_cooling, HVACMode.COOL)
                     
         except Exception as e:
             self.log(f"Error in periodic check: {e}", level="ERROR")
@@ -165,36 +216,34 @@ class SmartAirconController(hass.Hass):
         """Update current state of all zones"""
         for zone_name, zone in self.zones.items():
             try:
-                # Get climate entity state
-                climate_state = self.get_state(zone.entity_id)
-                if climate_state in ["unavailable", "unknown", None]:
+                # Get climate entity state and attributes
+                climate_full_state = self.get_state(zone.entity_id, attribute="all")
+                
+                if not climate_full_state or "state" not in climate_full_state or climate_full_state["state"] in ["unavailable", "unknown", None]:
                     continue
-                    
-                # Update zone state
+                
+                # Update zone state from attributes
+                climate_state = climate_full_state["state"]
+                attributes = climate_full_state.get("attributes", {})
+                
                 zone.is_active = climate_state not in ["off", "unavailable"]
-                
-                # Get target temperature
-                climate_attrs = self.get_state(zone.entity_id, attribute="all")
-                if climate_attrs and "attributes" in climate_attrs:
-                    attrs = climate_attrs["attributes"]
-                    zone.target_temp = float(attrs.get("temperature", 0))
-                
-                # Get current temperature
-                temp_state = self.get_state(zone.temp_sensor)
-                if temp_state and temp_state not in ["unavailable", "unknown"]:
-                    zone.current_temp = float(temp_state)
+                zone.target_temp = float(attributes.get("temperature", 0.0))
+                zone.current_temp = float(attributes.get("current_temperature", 0.0))
                 
                 # Get damper position
                 damper_state = self.get_state(zone.damper_entity, attribute="current_position")
                 if damper_state is not None:
                     zone.damper_position = int(damper_state)
                     
+            except (ValueError, TypeError) as e:
+                self.log(f"Error processing state for zone {zone_name}: {e}", level="WARNING")
             except Exception as e:
                 self.log(f"Error updating zone {zone_name}: {e}", level="ERROR")
 
-    def _analyze_zones(self) -> List[str]:
+    def _analyze_zones(self) -> Tuple[List[str], List[str]]:
         """Analyze zones to determine which need heating/cooling"""
-        zones_needing_action = []
+        zones_needing_heating = []
+        zones_needing_cooling = []
         
         for zone_name, zone in self.zones.items():
             if not zone.is_active:
@@ -202,32 +251,33 @@ class SmartAirconController(hass.Hass):
                 
             # Check if zone needs heating
             if zone.current_temp < (zone.target_temp - self.config.temp_tolerance):
-                zones_needing_action.append(zone_name)
+                zones_needing_heating.append(zone_name)
                 self.log(f"Zone {zone_name} needs heating: {zone.current_temp}°C < {zone.target_temp - self.config.temp_tolerance}°C")
             
-            # Check if zone needs cooling (for future implementation)
+            # Check if zone needs cooling
             elif zone.current_temp > (zone.target_temp + self.config.temp_tolerance):
-                # TODO: Implement cooling logic
-                pass
+                zones_needing_cooling.append(zone_name)
+                self.log(f"Zone {zone_name} needs cooling: {zone.current_temp}°C > {zone.target_temp + self.config.temp_tolerance}°C")
                 
-        return zones_needing_action
+        return zones_needing_heating, zones_needing_cooling
 
-    def _execute_smart_algorithm(self, trigger_zones: List[str]):
-        """Execute the smart heating algorithm"""
-        self.log(f"Executing smart algorithm for zones: {trigger_zones}")
+    def _execute_smart_algorithm(self, trigger_zones: List[str], mode: HVACMode):
+        """Execute the smart heating/cooling algorithm"""
+        self.log(f"Executing smart {mode.value} algorithm for zones: {trigger_zones}")
         
         # Calculate damper positions for all active zones
-        damper_positions = self._calculate_damper_positions(trigger_zones)
+        damper_positions = self._calculate_damper_positions(trigger_zones, mode)
         
-        # Set HVAC to heating mode
-        self._set_hvac_mode(HVACMode.HEAT)
+        # Set HVAC to the appropriate mode
+        self._set_hvac_mode(mode)
         
         # Apply damper positions
         self._apply_damper_positions(damper_positions)
         
         self.algorithm_active = True
+        self.algorithm_mode = mode
 
-    def _calculate_damper_positions(self, trigger_zones: List[str]) -> Dict[str, int]:
+    def _calculate_damper_positions(self, trigger_zones: List[str], mode: HVACMode) -> Dict[str, int]:
         """Calculate optimal damper positions for all zones"""
         damper_positions = {}
         
@@ -237,7 +287,7 @@ class SmartAirconController(hass.Hass):
                 continue
             
             if zone.isolation and zone_name not in trigger_zones:
-                # Isolated zones don't participate in shared heating
+                # Isolated zones don't participate unless they are a trigger
                 damper_positions[zone_name] = 0
                 continue
             
@@ -246,16 +296,19 @@ class SmartAirconController(hass.Hass):
                 damper_positions[zone_name] = self.config.primary_damper_percent
             else:
                 # Calculate damper position for secondary zones
-                temp_diff = zone.target_temp - zone.current_temp
-                
-                if temp_diff > 0:
-                    # Zone could benefit from heating
+                if mode == HVACMode.HEAT:
+                    temp_diff = zone.target_temp - zone.current_temp
+                else:  # COOL mode
+                    temp_diff = zone.current_temp - zone.target_temp
+
+                if temp_diff > self.config.temp_tolerance:
+                    # Zone could benefit from heating/cooling
                     damper_positions[zone_name] = self.config.secondary_damper_percent
                 elif temp_diff > -self.config.temp_tolerance:
                     # Zone is close to target, minimal damper opening
                     damper_positions[zone_name] = self.config.overflow_damper_percent
                 else:
-                    # Zone is above target, keep damper closed
+                    # Zone is above target (for heat) or below target (for cool)
                     damper_positions[zone_name] = 0
                     
         return damper_positions
@@ -299,15 +352,26 @@ class SmartAirconController(hass.Hass):
 
     def _all_zones_satisfied(self) -> bool:
         """Check if all active zones are within their target temperature range"""
+        if not self.algorithm_mode:
+            return True # Should not happen if algorithm is active
+
         for zone_name, zone in self.zones.items():
             if not zone.is_active:
                 continue
-                
-            temp_min = zone.target_temp
-            temp_max = zone.target_temp + self.config.temp_tolerance
+
+            if self.algorithm_mode == HVACMode.HEAT:
+                # Satisfied if temp is at or slightly above target
+                temp_min = zone.target_temp
+                temp_max = zone.target_temp + self.config.temp_tolerance
+                if not (temp_min <= zone.current_temp <= temp_max):
+                    return False
             
-            if not (temp_min <= zone.current_temp <= temp_max):
-                return False
+            elif self.algorithm_mode == HVACMode.COOL:
+                # Satisfied if temp is at or slightly below target
+                temp_min = zone.target_temp - self.config.temp_tolerance
+                temp_max = zone.target_temp
+                if not (temp_min <= zone.current_temp <= temp_max):
+                    return False
                 
         return True
 
@@ -322,6 +386,7 @@ class SmartAirconController(hass.Hass):
         # We don't force close dampers to let the normal system take over
         
         self.algorithm_active = False
+        self.algorithm_mode = None
 
     def toggle_controller(self, state: bool):
         """Enable or disable the smart controller"""
@@ -339,6 +404,7 @@ class SmartAirconController(hass.Hass):
             "enabled": self.config.enabled,
             "algorithm_active": self.algorithm_active,
             "current_hvac_mode": self.current_hvac_mode,
+            "algorithm_mode": self.algorithm_mode.value if self.algorithm_mode else None,
             "active_zones": active_zones,
             "last_check": self.last_check_time.isoformat() if self.last_check_time else None,
             "zone_states": {
@@ -350,4 +416,4 @@ class SmartAirconController(hass.Hass):
                 }
                 for name, zone in self.zones.items()
             }
-        } 
+        }

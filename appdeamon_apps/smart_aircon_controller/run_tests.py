@@ -15,8 +15,9 @@ def run_simple_tests():
     print("=" * 60)
     
     try:
-        result = subprocess.run([sys.executable, "simple_tests.py"], 
-                              capture_output=True, text=True)
+        result = subprocess.run([sys.executable, "-m", "unittest", "discover", "."], 
+                              capture_output=True, text=True,
+                              cwd=os.path.dirname(os.path.abspath(__file__)))
         
         print(result.stdout)
         if result.stderr:
@@ -35,8 +36,9 @@ def run_coverage_tests():
     try:
         # Run with coverage
         result = subprocess.run([
-            sys.executable, "-m", "coverage", "run", "--source=.", "simple_tests.py"
-        ], capture_output=True, text=True)
+            sys.executable, "-m", "coverage", "run", "--source=.", "-m", "unittest", "discover", "."
+        ], capture_output=True, text=True,
+           cwd=os.path.dirname(os.path.abspath(__file__)))
         
         print(result.stdout)
         if result.stderr:
@@ -44,8 +46,10 @@ def run_coverage_tests():
         
         if result.returncode == 0:
             # Generate coverage report
-            subprocess.run([sys.executable, "-m", "coverage", "report"])
-            subprocess.run([sys.executable, "-m", "coverage", "html"])
+            subprocess.run([sys.executable, "-m", "coverage", "report"],
+                           cwd=os.path.dirname(os.path.abspath(__file__)))
+            subprocess.run([sys.executable, "-m", "coverage", "html"],
+                           cwd=os.path.dirname(os.path.abspath(__file__)))
             print("\nHTML coverage report generated in: htmlcov/")
         
         return result.returncode == 0

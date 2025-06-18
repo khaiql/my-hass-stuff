@@ -54,19 +54,16 @@ class TestSmartAirconController(unittest.TestCase):
                 "living": {
                     "climate_entity": "climate.living",
                     "damper_entity": "cover.living_damper",
-                    "temp_sensor": "sensor.living_temperature",
                     "isolation": False
                 },
                 "baby_bed": {
                     "climate_entity": "climate.baby_bed",
                     "damper_entity": "cover.baby_bed_damper",
-                    "temp_sensor": "sensor.baby_bed_temperature",
                     "isolation": True
                 },
                 "master_bed": {
                     "climate_entity": "climate.master_bed",
                     "damper_entity": "cover.master_bed_damper",
-                    "temp_sensor": "sensor.master_bed_temperature",
                     "isolation": False
                 }
             }
@@ -78,6 +75,23 @@ class TestSmartAirconController(unittest.TestCase):
         # Initialize the controller
         self.controller._load_config()
         self.controller._initialize_zones()
+        self.controller.algorithm_mode = None
+
+    def _mock_zone_states(self, states):
+        """Helper to mock climate entity states"""
+        def get_state_side_effect(entity_id, attribute=None):
+            if attribute == 'all' and entity_id in states:
+                return {
+                    "state": states[entity_id].get("state", "heat"),
+                    "attributes": {
+                        "current_temperature": states[entity_id].get("current_temp", 0.0),
+                        "temperature": states[entity_id].get("target_temp", 0.0)
+                    }
+                }
+            elif entity_id in states:
+                 return states[entity_id].get("state", "heat")
+            return None
+        self.controller.get_state.side_effect = get_state_side_effect
 
     def test_config_loading(self):
         """Test configuration loading"""
@@ -85,6 +99,7 @@ class TestSmartAirconController(unittest.TestCase):
         self.assertEqual(self.controller.config.check_interval, 30)
         self.assertEqual(self.controller.config.temp_tolerance, 0.5)
         self.assertEqual(self.controller.config.primary_damper_percent, 50)
+        self.assertFalse(self.controller.zones["living"].isolation)
 
     def test_zone_initialization(self):
         """Test zone initialization"""
@@ -100,16 +115,12 @@ class TestSmartAirconController(unittest.TestCase):
     def test_zone_state_update(self):
         """Test zone state updating"""
         # Mock climate entity states
-        self.controller.get_state.side_effect = lambda entity, attribute=None: {
-            "climate.living": "heat",
-            "climate.baby_bed": "off",
-            "climate.master_bed": "heat",
-            "sensor.living_temperature": "21.5",
-            "sensor.baby_bed_temperature": "19.2",
-            "sensor.master_bed_temperature": "20.8"
-        }.get(entity, {
-            "attributes": {"temperature": 22.0}
-        } if attribute == "all" else 50)
+        mock_states = {
+            "climate.living": {"state": "heat", "current_temp": 21.5, "target_temp": 22.0},
+            "climate.baby_bed": {"state": "off", "current_temp": 19.2, "target_temp": 20.0},
+            "climate.master_bed": {"state": "heat", "current_temp": 20.8, "target_temp": 21.0}
+        }
+        self._mock_zone_states(mock_states)
         
         self.controller._update_zone_states()
         
@@ -120,6 +131,7 @@ class TestSmartAirconController(unittest.TestCase):
         
         self.assertEqual(self.controller.zones["living"].current_temp, 21.5)
         self.assertEqual(self.controller.zones["baby_bed"].current_temp, 19.2)
+        self.assertEqual(self.controller.zones["master_bed"].current_temp, 20.8)
 
     def test_analyze_zones_heating_needed(self):
         """Test zone analysis for heating needs"""
@@ -134,51 +146,102 @@ class TestSmartAirconController(unittest.TestCase):
         
         self.controller.zones["master_bed"].is_active = False
         
-        zones_needing_action = self.controller._analyze_zones()
+        zones_needing_heating, zones_needing_cooling = self.controller._analyze_zones()
         
         # Both active zones need heating (temp < target - tolerance)
-        self.assertIn("living", zones_needing_action)
-        self.assertIn("baby_bed", zones_needing_action)
-        self.assertEqual(len(zones_needing_action), 2)
+        self.assertIn("living", zones_needing_heating)
+        self.assertIn("baby_bed", zones_needing_heating)
+        self.assertEqual(len(zones_needing_heating), 2)
+        self.assertEqual(len(zones_needing_cooling), 0)
 
-    def test_analyze_zones_no_heating_needed(self):
-        """Test zone analysis when no heating is needed"""
+    def test_analyze_zones_cooling_needed(self):
+        """Test zone analysis for cooling needs"""
+        # Set up zone states
+        self.controller.zones["living"].is_active = True
+        self.controller.zones["living"].current_temp = 23.0
+        self.controller.zones["living"].target_temp = 22.0 # Needs cooling
+        
+        self.controller.zones["baby_bed"].is_active = True
+        self.controller.zones["baby_bed"].current_temp = 21.0
+        self.controller.zones["baby_bed"].target_temp = 20.0 # Needs cooling
+        
+        self.controller.zones["master_bed"].is_active = True
+        self.controller.zones["master_bed"].current_temp = 20.0
+        self.controller.zones["master_bed"].target_temp = 20.0 # Satisfied
+
+        zones_needing_heating, zones_needing_cooling = self.controller._analyze_zones()
+        
+        self.assertIn("living", zones_needing_cooling)
+        self.assertIn("baby_bed", zones_needing_cooling)
+        self.assertEqual(len(zones_needing_cooling), 2)
+        self.assertEqual(len(zones_needing_heating), 0)
+
+    def test_analyze_zones_no_action_needed(self):
+        """Test zone analysis when no heating or cooling is needed"""
         # Set up zone states within tolerance
         self.controller.zones["living"].is_active = True
         self.controller.zones["living"].current_temp = 22.0
         self.controller.zones["living"].target_temp = 22.0
         
-        zones_needing_action = self.controller._analyze_zones()
+        zones_needing_heating, zones_needing_cooling = self.controller._analyze_zones()
         
-        # No zones need heating
-        self.assertEqual(len(zones_needing_action), 0)
+        # No zones need action
+        self.assertEqual(len(zones_needing_heating), 0)
+        self.assertEqual(len(zones_needing_cooling), 0)
 
-    def test_calculate_damper_positions_primary_zone(self):
-        """Test damper position calculation for primary trigger zone"""
+    def test_calculate_damper_positions_heating(self):
+        """Test damper position calculation for heating mode"""
         # Set up zones
         self.controller.zones["living"].is_active = True
-        self.controller.zones["living"].current_temp = 21.0
+        self.controller.zones["living"].current_temp = 21.0 # Needs heat
         self.controller.zones["living"].target_temp = 22.0
         
         self.controller.zones["baby_bed"].is_active = True
-        self.controller.zones["baby_bed"].current_temp = 19.8
+        self.controller.zones["baby_bed"].current_temp = 19.8 # Satisfied, but can benefit
         self.controller.zones["baby_bed"].target_temp = 20.0
         
         self.controller.zones["master_bed"].is_active = True
-        self.controller.zones["master_bed"].current_temp = 20.5
+        self.controller.zones["master_bed"].current_temp = 20.6 # Over temp
         self.controller.zones["master_bed"].target_temp = 20.0
         
         trigger_zones = ["living"]
-        positions = self.controller._calculate_damper_positions(trigger_zones)
+        positions = self.controller._calculate_damper_positions(trigger_zones, HVACMode.HEAT)
         
-        # Check primary zone gets full opening
+        # Check primary zone gets primary opening
         self.assertEqual(positions["living"], 50)
         
-        # Check secondary zone that could benefit - NOTE: Baby bed is isolated so gets 0
+        # Check isolated zone (baby_bed) gets 0
         self.assertEqual(positions["baby_bed"], 0)
         
-        # Check zone above target gets minimal opening
-        self.assertEqual(positions["master_bed"], 10)
+        # Check zone above target gets no opening
+        self.assertEqual(positions["master_bed"], 0)
+
+    def test_calculate_damper_positions_cooling(self):
+        """Test damper position calculation for cooling mode"""
+        # Set up zones
+        self.controller.zones["living"].is_active = True
+        self.controller.zones["living"].current_temp = 23.0 # Needs cooling
+        self.controller.zones["living"].target_temp = 22.0
+        
+        self.controller.zones["master_bed"].is_active = True
+        self.controller.zones["master_bed"].current_temp = 20.2 # Can benefit from cooling
+        self.controller.zones["master_bed"].target_temp = 20.0
+
+        self.controller.zones["baby_bed"].is_active = True
+        self.controller.zones["baby_bed"].current_temp = 19.4 # Under temp
+        self.controller.zones["baby_bed"].target_temp = 20.0
+        
+        trigger_zones = ["living"]
+        positions = self.controller._calculate_damper_positions(trigger_zones, HVACMode.COOL)
+        
+        # Check primary zone gets primary opening
+        self.assertEqual(positions["living"], 50)
+
+        # Check secondary zone that can benefit from cooling
+        self.assertEqual(positions["master_bed"], 40)
+        
+        # Check isolated zone (baby_bed) under temp gets 0
+        self.assertEqual(positions["baby_bed"], 0)
 
     def test_calculate_damper_positions_isolated_zone(self):
         """Test damper position calculation with isolated zone"""
@@ -193,7 +256,7 @@ class TestSmartAirconController(unittest.TestCase):
         
         # Living room triggers, baby bed is isolated
         trigger_zones = ["living"]
-        positions = self.controller._calculate_damper_positions(trigger_zones)
+        positions = self.controller._calculate_damper_positions(trigger_zones, HVACMode.HEAT)
         
         # Baby bed should not participate in shared heating
         self.assertEqual(positions["baby_bed"], 0)
@@ -212,7 +275,7 @@ class TestSmartAirconController(unittest.TestCase):
         
         # Baby bed triggers - should get primary opening despite isolation
         trigger_zones = ["baby_bed"]
-        positions = self.controller._calculate_damper_positions(trigger_zones)
+        positions = self.controller._calculate_damper_positions(trigger_zones, HVACMode.HEAT)
         
         # Baby bed gets primary opening as it's the trigger
         self.assertEqual(positions["baby_bed"], 50)
@@ -260,54 +323,56 @@ class TestSmartAirconController(unittest.TestCase):
         # Verify no service call made
         self.controller.call_service.assert_not_called()
 
-    def test_all_zones_satisfied_true(self):
-        """Test all zones satisfied check - positive case"""
-        # Set up zones within tolerance
+    def test_all_zones_satisfied_heating_true(self):
+        """Test all zones satisfied for heating mode"""
+        self.controller.algorithm_mode = HVACMode.HEAT
         self.controller.zones["living"].is_active = True
-        self.controller.zones["living"].current_temp = 22.0
+        self.controller.zones["living"].current_temp = 22.2
         self.controller.zones["living"].target_temp = 22.0
         
-        self.controller.zones["baby_bed"].is_active = True
-        self.controller.zones["baby_bed"].current_temp = 20.2
-        self.controller.zones["baby_bed"].target_temp = 20.0
-        
-        self.controller.zones["master_bed"].is_active = False
-        
-        result = self.controller._all_zones_satisfied()
-        self.assertTrue(result)
+        self.assertTrue(self.controller._all_zones_satisfied())
 
-    def test_all_zones_satisfied_false(self):
-        """Test all zones satisfied check - negative case"""
-        # Set up zones with one outside tolerance
+    def test_all_zones_satisfied_heating_false(self):
+        """Test all zones not satisfied for heating mode"""
+        self.controller.algorithm_mode = HVACMode.HEAT
         self.controller.zones["living"].is_active = True
-        self.controller.zones["living"].current_temp = 21.0
+        self.controller.zones["living"].current_temp = 21.8 # Below target
         self.controller.zones["living"].target_temp = 22.0
         
-        self.controller.zones["baby_bed"].is_active = True
-        self.controller.zones["baby_bed"].current_temp = 20.2
-        self.controller.zones["baby_bed"].target_temp = 20.0
+        self.assertFalse(self.controller._all_zones_satisfied())
+
+    def test_all_zones_satisfied_cooling_true(self):
+        """Test all zones satisfied for cooling mode"""
+        self.controller.algorithm_mode = HVACMode.COOL
+        self.controller.zones["living"].is_active = True
+        self.controller.zones["living"].current_temp = 21.8
+        self.controller.zones["living"].target_temp = 22.0
         
-        result = self.controller._all_zones_satisfied()
-        self.assertFalse(result)
+        self.assertTrue(self.controller._all_zones_satisfied())
+
+    def test_all_zones_satisfied_cooling_false(self):
+        """Test all zones not satisfied for cooling mode"""
+        self.controller.algorithm_mode = HVACMode.COOL
+        self.controller.zones["living"].is_active = True
+        self.controller.zones["living"].current_temp = 22.2 # Above target
+        self.controller.zones["living"].target_temp = 22.0
+        
+        self.assertFalse(self.controller._all_zones_satisfied())
 
     def test_execute_smart_algorithm(self):
-        """Test smart algorithm execution"""
+        """Test the main algorithm execution function"""
         trigger_zones = ["living"]
-        
-        # Mock the sub-methods
-        self.controller._calculate_damper_positions = Mock(return_value={"living": 50})
-        self.controller._set_hvac_mode = Mock()
-        self.controller._apply_damper_positions = Mock()
-        
-        self.controller._execute_smart_algorithm(trigger_zones)
-        
-        # Verify all steps were called
-        self.controller._calculate_damper_positions.assert_called_once_with(trigger_zones)
-        self.controller._set_hvac_mode.assert_called_once_with(HVACMode.HEAT)
-        self.controller._apply_damper_positions.assert_called_once()
-        
-        # Verify algorithm is marked as active
-        self.assertTrue(self.controller.algorithm_active)
+        with patch.object(self.controller, '_calculate_damper_positions') as mock_calc, \
+             patch.object(self.controller, '_set_hvac_mode') as mock_set_mode, \
+             patch.object(self.controller, '_apply_damper_positions') as mock_apply:
+            
+            self.controller._execute_smart_algorithm(trigger_zones, HVACMode.HEAT)
+            
+            mock_calc.assert_called_with(trigger_zones, HVACMode.HEAT)
+            mock_set_mode.assert_called_with(HVACMode.HEAT)
+            mock_apply.assert_called()
+            self.assertTrue(self.controller.algorithm_active)
+            self.assertEqual(self.controller.algorithm_mode, HVACMode.HEAT)
 
     def test_deactivate_algorithm(self):
         """Test algorithm deactivation"""
@@ -321,36 +386,44 @@ class TestSmartAirconController(unittest.TestCase):
         
         # Verify algorithm marked as inactive
         self.assertFalse(self.controller.algorithm_active)
+        self.assertIsNone(self.controller.algorithm_mode)
 
     def test_periodic_check_no_action_needed(self):
         """Test periodic check when no action is needed"""
-        self.controller._update_zone_states = Mock()
-        self.controller._analyze_zones = Mock(return_value=[])
-        self.controller.algorithm_active = False
-        
-        self.controller._periodic_check({})
-        
-        # Verify zone states were updated
-        self.controller._update_zone_states.assert_called_once()
-        
-        # Verify analysis was performed
-        self.controller._analyze_zones.assert_called_once()
+        with patch.object(self.controller, '_update_zone_states'), \
+             patch.object(self.controller, '_analyze_zones', return_value=([], [])) as mock_analyze, \
+             patch.object(self.controller, '_execute_smart_algorithm') as mock_execute:
+            
+            self.controller._periodic_check({})
+            mock_analyze.assert_called()
+            mock_execute.assert_not_called()
 
-    def test_periodic_check_action_needed(self):
-        """Test periodic check when action is needed"""
-        self.controller._update_zone_states = Mock()
-        self.controller._analyze_zones = Mock(return_value=["living"])
-        self.controller._execute_smart_algorithm = Mock()
-        
-        self.controller._periodic_check({})
-        
-        # Verify algorithm was executed
-        self.controller._execute_smart_algorithm.assert_called_once_with(["living"])
+    def test_periodic_check_heating_needed(self):
+        """Test periodic check when heating action is needed"""
+        zones = ["living"]
+        with patch.object(self.controller, '_update_zone_states'), \
+             patch.object(self.controller, '_analyze_zones', return_value=(zones, [])) as mock_analyze, \
+             patch.object(self.controller, '_execute_smart_algorithm') as mock_execute:
+
+            self.controller._periodic_check({})
+            mock_analyze.assert_called()
+            mock_execute.assert_called_with(zones, HVACMode.HEAT)
+
+    def test_periodic_check_cooling_needed(self):
+        """Test periodic check when cooling action is needed"""
+        zones = ["living"]
+        with patch.object(self.controller, '_update_zone_states'), \
+             patch.object(self.controller, '_analyze_zones', return_value=([], zones)) as mock_analyze, \
+             patch.object(self.controller, '_execute_smart_algorithm') as mock_execute:
+
+            self.controller._periodic_check({})
+            mock_analyze.assert_called()
+            mock_execute.assert_called_with(zones, HVACMode.COOL)
 
     def test_periodic_check_deactivation(self):
-        """Test periodic check triggering deactivation"""
+        """Test periodic check for deactivation"""
         self.controller._update_zone_states = Mock()
-        self.controller._analyze_zones = Mock(return_value=[])
+        self.controller._analyze_zones = Mock(return_value=([], []))
         self.controller._all_zones_satisfied = Mock(return_value=True)
         self.controller._deactivate_algorithm = Mock()
         self.controller.algorithm_active = True
@@ -367,6 +440,7 @@ class TestSmartAirconController(unittest.TestCase):
         self.controller.toggle_controller(True)
         
         self.assertTrue(self.controller.config.enabled)
+        self.assertIsNone(self.controller.algorithm_mode)
 
     def test_toggle_controller_disable_with_active_algorithm(self):
         """Test disabling controller with active algorithm"""
@@ -378,6 +452,7 @@ class TestSmartAirconController(unittest.TestCase):
         
         self.assertFalse(self.controller.config.enabled)
         self.controller._deactivate_algorithm.assert_called_once()
+        self.assertIsNone(self.controller.algorithm_mode)
 
     def test_get_status(self):
         """Test status reporting"""
@@ -428,12 +503,34 @@ class TestSmartAirconController(unittest.TestCase):
             level="ERROR"
         )
 
+    def test_periodic_check_sticks_to_mode_during_conflict(self):
+        """Test that periodic check does not switch modes mid-cycle."""
+        self.controller.algorithm_active = True
+        self.controller.algorithm_mode = HVACMode.HEAT
+
+        # One zone still needs heating, but another now needs cooling (a new conflict)
+        zones_needing_heating = ["living"]
+        zones_needing_cooling = ["master_bed"]
+
+        with patch.object(self.controller, '_update_zone_states'), \
+             patch.object(self.controller, '_analyze_zones', return_value=(zones_needing_heating, zones_needing_cooling)), \
+             patch.object(self.controller, '_all_zones_satisfied', return_value=False), \
+             patch.object(self.controller, '_deactivate_algorithm') as mock_deactivate, \
+             patch.object(self.controller, '_execute_smart_algorithm') as mock_execute:
+
+            self.controller._periodic_check({})
+
+            # It should NOT deactivate
+            mock_deactivate.assert_not_called()
+            # It SHOULD call execute again, but ONLY for the original HEAT mode
+            mock_execute.assert_called_with(zones_needing_heating, HVACMode.HEAT)
+
 
 class TestEdgeCases(unittest.TestCase):
     """Test edge cases and error conditions"""
 
     def setUp(self):
-        """Set up test fixtures for edge cases"""
+        """Set up test fixtures"""
         self.controller = SmartAirconController()
         self.controller.log = Mock()
         self.controller.get_state = Mock()
@@ -445,11 +542,9 @@ class TestEdgeCases(unittest.TestCase):
         self.controller.args = {
             "enabled": True,
             "zones": {
-                "test_zone": {
-                    "climate_entity": "climate.test",
-                    "damper_entity": "cover.test_damper",
-                    "temp_sensor": "sensor.test_temp",
-                    "isolation": False
+                "living": {
+                    "climate_entity": "climate.living",
+                    "damper_entity": "cover.living_damper"
                 }
             }
         }
@@ -457,67 +552,41 @@ class TestEdgeCases(unittest.TestCase):
         self.controller._load_config()
         self.controller._initialize_zones()
 
-    def test_unavailable_climate_entity(self):
-        """Test handling of unavailable climate entity"""
-        self.controller.get_state.return_value = "unavailable"
-        
+    def test_unavailable_climate_entity_state(self):
+        """Test handling of unavailable climate entity state"""
+        mock_states = {"climate.living": {"state": "unavailable"}}
+        self._mock_zone_states(mock_states)
         self.controller._update_zone_states()
-        
-        # Zone should remain inactive
-        self.assertFalse(self.controller.zones["test_zone"].is_active)
-
-    def test_unavailable_temperature_sensor(self):
-        """Test handling of unavailable temperature sensor"""
-        def mock_get_state(entity, attribute=None):
-            if "temp" in entity:
-                return "unavailable"
-            return "heat"
-        
-        self.controller.get_state.side_effect = mock_get_state
-        
-        self.controller._update_zone_states()
-        
-        # Temperature should remain at default
-        self.assertEqual(self.controller.zones["test_zone"].current_temp, 0.0)
+        self.assertFalse(self.controller.zones["living"].is_active)
 
     def test_invalid_temperature_value(self):
-        """Test handling of invalid temperature values"""
-        def mock_get_state(entity, attribute=None):
-            if "temp" in entity:
-                return "not_a_number"
-            return "heat"
-        
-        self.controller.get_state.side_effect = mock_get_state
-        
-        # Should not raise exception
+        """Test handling of invalid temperature value"""
+        mock_states = {"climate.living": {"current_temp": "invalid"}}
+        self._mock_zone_states(mock_states)
         self.controller._update_zone_states()
+        self.assertEqual(self.controller.zones["living"].current_temp, 0.0) # Should not crash and default to 0
+        self.controller.log.assert_called()
 
     def test_damper_service_call_failure(self):
         """Test handling of damper service call failures"""
         self.controller.call_service.side_effect = Exception("Service call failed")
         
-        positions = {"test_zone": 50}
+        positions = {"living": 50}
         
         # Should not raise exception
         self.controller._apply_damper_positions(positions)
         
         # Error should be logged - note the exact call
         args_list = [call[0] for call in self.controller.log.call_args_list]
-        error_logged = any("Error setting damper for test_zone" in str(args) for args in args_list)
+        error_logged = any("Error setting damper for living" in str(args) for args in args_list)
         self.assertTrue(error_logged, f"Expected error log not found. Actual calls: {self.controller.log.call_args_list}")
 
     def test_hvac_mode_change_failure(self):
         """Test handling of HVAC mode change failures"""
-        self.controller.call_service.side_effect = Exception("HVAC error")
         self.controller.get_state.return_value = "dry"
-        
-        # Should not raise exception
+        self.controller.call_service.side_effect = Exception("Service call failed")
         self.controller._set_hvac_mode(HVACMode.HEAT)
-        
-        # Error should be logged
-        args_list = [call[0] for call in self.controller.log.call_args_list]
-        error_logged = any("Error setting HVAC mode" in str(args) for args in args_list)
-        self.assertTrue(error_logged, f"Expected error log not found. Actual calls: {self.controller.log.call_args_list}")
+        self.controller.log.assert_called_with("Error setting HVAC mode: Service call failed", level="ERROR")
 
 
 if __name__ == "__main__":
