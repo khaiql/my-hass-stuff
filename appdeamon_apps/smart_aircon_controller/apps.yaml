@@ -1,0 +1,59 @@
+smart_aircon_controller:
+  module: smart_aircon_controller
+  class: SmartAirconController
+  
+  # Global settings
+  enabled: true
+  check_interval: 30  # seconds
+  temp_tolerance: 0.5  # temperature standard deviation
+  
+  # Main AC entity
+  main_climate: climate.aircon
+  
+  # Zone configuration based on your current setup
+  zones:
+    living:
+      climate_entity: climate.living
+      damper_entity: cover.living_damper
+      temp_sensor: sensor.living_temperature
+      isolation: false
+    baby_bed:
+      climate_entity: climate.baby_bed
+      damper_entity: cover.baby_bed_damper
+      temp_sensor: sensor.baby_bed_temperature
+      isolation: true  # Baby room should be isolated for safety
+    guest_bed:
+      climate_entity: climate.guest_bed
+      damper_entity: cover.guest_bed_damper
+      temp_sensor: sensor.guest_bed_temperature
+      isolation: false
+    master_bed:
+      climate_entity: climate.master_bed
+      damper_entity: cover.master_bed_damper
+      temp_sensor: sensor.master_bed_temperature
+      isolation: false
+    study:
+      climate_entity: climate.study
+      damper_entity: cover.study_damper
+      temp_sensor: sensor.study_temperature
+      isolation: false
+    work:
+      climate_entity: climate.work
+      damper_entity: cover.work_damper
+      temp_sensor: sensor.work_temperature
+      isolation: false
+  
+  # Damper calculation parameters
+  primary_damper_percent: 50    # Primary trigger zone damper opening
+  secondary_damper_percent: 40  # Secondary zones that could benefit
+  overflow_damper_percent: 10   # Zones close to target but could use some heat
+  
+  # HVAC modes
+  heating_mode: "heat"
+  idle_mode: "dry"
+  cooling_mode: "cool"
+
+# Interface for controlling and monitoring the smart controller
+smart_aircon_controller_interface:
+  module: controller_interface
+  class: SmartAirconControllerInterface 

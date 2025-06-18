@@ -1,0 +1,11 @@
+# Testing dependencies for Smart Aircon Controller
+coverage>=7.0.0
+unittest2>=1.1.0  # For Python 2 compatibility if needed
+
+# Optional: For better test reporting
+pytest>=7.0.0
+pytest-cov>=4.0.0
+pytest-html>=3.1.0
+
+# Optional: For test mocking (already in standard library for Python 3.3+)
+mock>=4.0.0 

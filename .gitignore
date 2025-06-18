@@ -2,3 +2,6 @@ __pycache__/
 appdaemons/
 tags
 esphome/components/litter_robot_presence_detector/model_data.copy.h
+venv/
+.coverage
+htmlcov/
