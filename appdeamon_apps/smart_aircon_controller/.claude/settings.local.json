@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:appdaemon.readthedocs.io)",
+      "WebFetch(domain:appdaemon.readthedocs.io)",
+      "Bash(python3 test_damper_logic.py:*)"
+    ],
+    "deny": []
+  }
+}

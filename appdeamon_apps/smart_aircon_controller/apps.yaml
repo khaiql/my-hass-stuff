@@ -6,6 +6,7 @@ smart_aircon_controller:
   enabled: true
   check_interval: 30  # seconds
   temp_tolerance: 0.5  # temperature standard deviation
+  smart_hvac_mode: heat  # Desired seasonal mode: heat or cool
   
   # Main AC entity
   main_climate: climate.aircon
@@ -15,7 +16,7 @@ smart_aircon_controller:
     living:
       climate_entity: climate.living_2
       damper_entity: cover.living_damper_2
-      isolation: false
+      isolation: true
     baby_bed:
       climate_entity: climate.baby_bed_2
       damper_entity: cover.baby_bed_damper_2
@@ -41,11 +42,17 @@ smart_aircon_controller:
   primary_damper_percent: 50    # Primary trigger zone damper opening
   secondary_damper_percent: 40  # Secondary zones that could benefit
   overflow_damper_percent: 10   # Zones close to target but could use some heat
+  minimum_damper_percent: 5     # Minimum damper for active zones (never close)
   
   # HVAC modes
   heating_mode: "heat"
   idle_mode: "dry"
   cooling_mode: "cool"
+  
+  # Fallback mechanism for energy waste prevention
+  algorithm_timeout_minutes: 30    # Maximum runtime before fallback (energy protection)
+  stability_check_minutes: 10      # Minutes to check for temperature stability
+  progress_timeout_minutes: 15     # Minutes without progress before fallback
 
 # Interface for controlling and monitoring the smart controller
 smart_aircon_controller_interface:
