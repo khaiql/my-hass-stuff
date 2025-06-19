@@ -1,0 +1,94 @@
+# Home Assistant Configuration (configuration.yaml)
+# Add these helper entities to enable dynamic configuration of Smart Aircon Controller V2
+
+input_boolean:
+  smart_aircon_enabled:
+    name: "Smart Aircon Enabled"
+    icon: mdi:air-conditioner
+
+input_number:
+  smart_aircon_temp_tolerance:
+    name: "Temperature Tolerance"
+    min: 0.1
+    max: 2.0
+    step: 0.1
+    initial: 0.5
+    unit_of_measurement: "°C"
+    icon: mdi:thermometer
+    
+  smart_aircon_primary_damper:
+    name: "Primary Damper %"
+    min: 30
+    max: 100
+    step: 5
+    initial: 50
+    unit_of_measurement: "%"
+    icon: mdi:valve
+    
+  smart_aircon_secondary_damper:
+    name: "Secondary Damper %"
+    min: 20
+    max: 80
+    step: 5
+    initial: 40
+    unit_of_measurement: "%"
+    icon: mdi:valve
+    
+  smart_aircon_overflow_damper:
+    name: "Overflow Damper %"
+    min: 5
+    max: 30
+    step: 1
+    initial: 10
+    unit_of_measurement: "%"
+    icon: mdi:valve
+    
+  smart_aircon_minimum_damper:
+    name: "Minimum Damper %"
+    min: 1
+    max: 10
+    step: 1
+    initial: 5
+    unit_of_measurement: "%"
+    icon: mdi:valve
+
+input_select:
+  smart_aircon_mode:
+    name: "Smart HVAC Mode"
+    options:
+      - heat
+      - cool
+    initial: heat
+    icon: mdi:hvac
+
+# Optional: Automation for seasonal switching
+automation:
+  - id: smart_aircon_seasonal_mode
+    alias: "Smart Aircon: Seasonal Mode Switch"
+    description: "Automatically switch between heat/cool based on outdoor temperature"
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.outdoor_temperature  # Replace with your outdoor temp sensor
+        above: 25
+        for: "02:00:00"
+      - platform: numeric_state  
+        entity_id: sensor.outdoor_temperature  # Replace with your outdoor temp sensor
+        below: 18
+        for: "02:00:00"
+    action:
+      - service: input_select.select_option
+        target:
+          entity_id: input_select.smart_aircon_mode
+        data:
+          option: >
+            {% if trigger.above is defined %}
+              cool
+            {% else %}
+              heat
+            {% endif %}
+      - service: notify.mobile_app_your_phone  # Optional notification
+        data:
+          message: >
+            Smart Aircon automatically switched to {{ 
+              'cooling' if trigger.above is defined else 'heating' 
+            }} mode (outdoor temp: {{ states('sensor.outdoor_temperature') }}°C)

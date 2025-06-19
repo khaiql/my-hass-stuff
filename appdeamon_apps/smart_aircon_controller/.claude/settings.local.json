@@ -3,7 +3,15 @@
     "allow": [
       "WebFetch(domain:appdaemon.readthedocs.io)",
       "WebFetch(domain:appdaemon.readthedocs.io)",
-      "Bash(python3 test_damper_logic.py:*)"
+      "Bash(python3 test_damper_logic.py:*)",
+      "Bash(python -m pytest test_state_manager.py::TestStateManagerInitialization::test_initialization_with_valid_config -v)",
+      "Bash(source:*)",
+      "Bash(python -m pytest test_state_manager.py test_decision_engine.py -v)",
+      "Bash(python -m pytest -v --tb=short)",
+      "Bash(python -m pytest test_state_manager.py test_decision_engine.py -v --tb=short)",
+      "Bash(python -m pytest test_decision_engine.py::TestAutomaticIdleModeLogic -v)",
+      "Bash(rm:*)",
+      "Bash(python:*)"
     ],
     "deny": []
   }

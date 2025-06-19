@@ -1,22 +1,41 @@
 smart_aircon_controller:
-  module: smart_aircon_controller.smart_aircon_controller
+  module: smart_aircon_controller
   class: SmartAirconController
   
-  # Global settings
-  enabled: true
-  check_interval: 30  # seconds
-  temp_tolerance: 0.5  # temperature standard deviation
-  smart_hvac_mode: heat  # Desired seasonal mode: heat or cool
-  
-  # Main AC entity
+  # Static configuration (requires restart to change)
+  check_interval: 30
   main_climate: climate.aircon
+  algorithm_timeout_minutes: 30
+  stability_check_minutes: 10
+  progress_timeout_minutes: 15
   
-  # Zone configuration based on your current setup
+  # Dynamic configuration entities (runtime changeable via HA)
+  # These entities must exist in Home Assistant - see home_assistant_config.yaml
+  config_entities:
+    enabled: input_boolean.smart_aircon_enabled
+    temp_tolerance: input_number.smart_aircon_temp_tolerance
+    smart_hvac_mode: input_select.smart_aircon_mode
+    primary_damper_percent: input_number.smart_aircon_primary_damper
+    secondary_damper_percent: input_number.smart_aircon_secondary_damper
+    overflow_damper_percent: input_number.smart_aircon_overflow_damper
+    minimum_damper_percent: input_number.smart_aircon_minimum_damper
+  
+  # Fallback values if entities unavailable
+  config_defaults:
+    enabled: true
+    temp_tolerance: 0.5
+    smart_hvac_mode: "heat"
+    primary_damper_percent: 50
+    secondary_damper_percent: 40
+    overflow_damper_percent: 10
+    minimum_damper_percent: 5
+  
+  # Zone configuration (static)
   zones:
     living:
       climate_entity: climate.living_2
       damper_entity: cover.living_damper_2
-      isolation: true
+      isolation: false
     baby_bed:
       climate_entity: climate.baby_bed_2
       damper_entity: cover.baby_bed_damper_2
@@ -34,27 +53,6 @@ smart_aircon_controller:
       damper_entity: cover.study_damper_2
       isolation: false
     work:
-      climate_entity: climate.work_2
+      climate_entity: climate.work_3
       damper_entity: cover.work_damper_2
       isolation: false
-  
-  # Damper calculation parameters
-  primary_damper_percent: 50    # Primary trigger zone damper opening
-  secondary_damper_percent: 40  # Secondary zones that could benefit
-  overflow_damper_percent: 10   # Zones close to target but could use some heat
-  minimum_damper_percent: 5     # Minimum damper for active zones (never close)
-  
-  # HVAC modes
-  heating_mode: "heat"
-  idle_mode: "dry"
-  cooling_mode: "cool"
-  
-  # Fallback mechanism for energy waste prevention
-  algorithm_timeout_minutes: 30    # Maximum runtime before fallback (energy protection)
-  stability_check_minutes: 10      # Minutes to check for temperature stability
-  progress_timeout_minutes: 15     # Minutes without progress before fallback
-
-# Interface for controlling and monitoring the smart controller
-smart_aircon_controller_interface:
-  module: smart_aircon_controller.controller_interface
-  class: SmartAirconControllerInterface 

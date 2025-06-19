@@ -1,20 +1,23 @@
-import appdaemon.plugins.hass.hassapi as hass
 import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 from enum import Enum
+import appdaemon.plugins.hass.hassapi as hass
 
 
 class HVACMode(Enum):
+    """HVAC operating modes."""
+
     HEAT = "heat"
     COOL = "cool"
     DRY = "dry"
+    FAN = "fan"
     OFF = "off"
 
 
 @dataclass
 class ZoneState:
-    """Represents the current state of a zone"""
+    """State of a single zone."""
 
     entity_id: str
     damper_entity: str
@@ -27,330 +30,192 @@ class ZoneState:
 
 @dataclass
 class ControllerConfig:
-    """Configuration for the smart aircon controller"""
+    """Configuration for the smart aircon controller."""
 
-    enabled: bool = True
+    # Static configuration (requires restart)
     check_interval: int = 30
-    temp_tolerance: float = 0.5
     main_climate: str = "climate.aircon"
+    algorithm_timeout_minutes: int = 30
+    stability_check_minutes: int = 10
+    progress_timeout_minutes: int = 15
+
+    # Dynamic configuration (runtime changeable via HA entities)
+    enabled: bool = True
+    temp_tolerance: float = 0.5
+    smart_hvac_mode: str = "heat"  # "heat" or "cool"
     primary_damper_percent: int = 50
     secondary_damper_percent: int = 40
     overflow_damper_percent: int = 10
-    minimum_damper_percent: int = 5  # Minimum damper for active zones to keep them on
-    heating_mode: str = "heat"
-    idle_mode: str = "dry"
-    cooling_mode: str = "cool"
-    smart_hvac_mode: str = "heat"  # Desired seasonal mode: heat or cool
-    # Fallback mechanism for Airtouch controller interference
-    algorithm_timeout_minutes: int = 30  # Max time before fallback
-    stability_check_minutes: int = 10  # Time to check for temperature stability
-    progress_timeout_minutes: int = 15  # Time without progress before fallback
+    minimum_damper_percent: int = 5
 
 
-class SmartAirconController(hass.Hass):
-    """
-    Smart Aircon Controller for Airtouch 5 System
+class ConfigManager:
+    """Manages dynamic configuration from Home Assistant entities."""
 
-    Implements energy-efficient heating/cooling by coordinating multiple zones
-    and leveraging shared heating when one zone triggers.
-    """
+    def __init__(
+        self, hass_api, config_entities: Dict[str, str], defaults: Dict[str, Any]
+    ):
+        self.hass = hass_api
+        self.config_entities = config_entities
+        self.defaults = defaults
+        self.current_config = ControllerConfig()
+        self.last_update = None
 
-    def initialize(self):
-        """Initialize the smart aircon controller"""
-        self.log("Initializing Smart Aircon Controller")
+        # Load initial configuration
+        self.update_config()
 
-        # Load configuration
-        self._load_config()
+    def update_config(self) -> bool:
+        """Update configuration from HA entities. Returns True if any values changed."""
+        changed = False
+        new_values = {}
 
-        # Initialize state tracking
+        # Read each config entity
+        for config_key, entity_id in self.config_entities.items():
+            try:
+                entity = self.hass.get_entity(entity_id)
+                state = entity.get_state()
+
+                if state in ["unavailable", "unknown", None]:
+                    # Use fallback value
+                    value = self.defaults.get(config_key)
+                    self.hass.log(
+                        f"WARNING: Config entity {entity_id} unavailable, using default: {value}"
+                    )
+                else:
+                    # Convert state to appropriate type
+                    if config_key == "enabled":
+                        value = state.lower() in ["on", "true", "1"]
+                    elif config_key == "smart_hvac_mode":
+                        value = str(state).lower()
+                    else:
+                        # Numeric values
+                        value = (
+                            float(state)
+                            if config_key == "temp_tolerance"
+                            else int(float(state))
+                        )
+
+                        # Validate ranges
+                        value = self._validate_numeric_value(config_key, value)
+
+                new_values[config_key] = value
+
+                # Check if value changed
+                if getattr(self.current_config, config_key) != value:
+                    self.hass.log(
+                        f"Config changed: {config_key} = {value} (was {getattr(self.current_config, config_key)})"
+                    )
+                    changed = True
+
+            except Exception as e:
+                # Use fallback value on error
+                value = self.defaults.get(config_key)
+                new_values[config_key] = value
+                self.hass.log(
+                    f"Error reading config entity {entity_id}: {e}, using default: {value}"
+                )
+
+        # Update config object
+        for key, value in new_values.items():
+            setattr(self.current_config, key, value)
+
+        self.last_update = datetime.datetime.now()
+        return changed
+
+    def _validate_numeric_value(self, config_key: str, value: float) -> float:
+        """Validate numeric configuration values and clamp to safe ranges."""
+        ranges = {
+            "temp_tolerance": (0.1, 5.0),
+            "primary_damper_percent": (30, 100),
+            "secondary_damper_percent": (20, 80),
+            "overflow_damper_percent": (5, 50),
+            "minimum_damper_percent": (1, 20),
+        }
+
+        if config_key in ranges:
+            min_val, max_val = ranges[config_key]
+            if value < min_val:
+                self.hass.log(
+                    f"WARNING: {config_key} value {value} below minimum {min_val}, clamping"
+                )
+                return min_val
+            elif value > max_val:
+                self.hass.log(
+                    f"WARNING: {config_key} value {value} above maximum {max_val}, clamping"
+                )
+                return max_val
+
+        return value
+
+    def get_config(self) -> ControllerConfig:
+        """Get current configuration."""
+        return self.current_config
+
+    def should_update(self) -> bool:
+        """Check if config should be updated (every 60 seconds)."""
+        if not self.last_update:
+            return True
+
+        return (datetime.datetime.now() - self.last_update).total_seconds() >= 60
+
+
+class StateManager:
+    """Manages all zone states and HVAC state."""
+
+    def __init__(
+        self, hass_api, config: ControllerConfig, zones_config: Dict[str, Dict]
+    ):
+        self.hass = hass_api
+        self.config = config
         self.zones: Dict[str, ZoneState] = {}
         self.current_hvac_mode: Optional[str] = None
-        self.algorithm_active: bool = False
-        self.algorithm_mode: Optional[HVACMode] = None
-        self.last_check_time: Optional[datetime.datetime] = None
-
-        # Fallback mechanism tracking
-        self.algorithm_start_time: Optional[datetime.datetime] = None
         self.temperature_history: Dict[str, List[Tuple[datetime.datetime, float]]] = {}
-        self.last_progress_time: Optional[datetime.datetime] = None
 
-        # Load zone configurations
-        self._initialize_zones()
+        self._initialize_zones(zones_config)
 
-        # Set up periodic checking
-        if self.config.enabled:
-            # Use string format for start time - "now+10" means start in 10 seconds
-            self.run_every(
-                self._periodic_check,
-                "now+10",
-                self.config.check_interval,
-            )
-            self.log(
-                f"Periodic check scheduled to start in 10 seconds, running every {self.config.check_interval} seconds"
-            )
-
-        # Schedule entity validation after Home Assistant has time to fully load
-        self.run_in(self._validate_entities, 30)
-
-        self.log(f"Smart Aircon Controller initialized with {len(self.zones)} zones")
-
-    def _load_config(self):
-        """Load configuration from apps.yaml"""
-        self.config = ControllerConfig(
-            enabled=self.args.get("enabled", True),
-            check_interval=self.args.get("check_interval", 30),
-            temp_tolerance=self.args.get("temp_tolerance", 0.5),
-            main_climate=self.args.get("main_climate", "climate.aircon"),
-            primary_damper_percent=self.args.get("primary_damper_percent", 50),
-            secondary_damper_percent=self.args.get("secondary_damper_percent", 40),
-            overflow_damper_percent=self.args.get("overflow_damper_percent", 10),
-            heating_mode=self.args.get("heating_mode", "heat"),
-            idle_mode=self.args.get("idle_mode", "dry"),
-            cooling_mode=self.args.get("cooling_mode", "cool"),
-            smart_hvac_mode=self.args.get("smart_hvac_mode", "heat"),
-            minimum_damper_percent=self.args.get("minimum_damper_percent", 5),
-            algorithm_timeout_minutes=self.args.get("algorithm_timeout_minutes", 30),
-            stability_check_minutes=self.args.get("stability_check_minutes", 10),
-            progress_timeout_minutes=self.args.get("progress_timeout_minutes", 15),
-        )
-
-    def _initialize_zones(self):
-        """Initialize zone configurations from config"""
-        zones_config = self.args.get("zones", {})
-        self.log(f"DEBUG: zones_config from args: {zones_config}")
-        self.log(f"DEBUG: Number of zones to initialize: {len(zones_config)}")
-
+    def _initialize_zones(self, zones_config: Dict[str, Dict]):
+        """Initialize zone configurations."""
         for zone_name, zone_config in zones_config.items():
             try:
-                # Get required entities
                 climate_entity = zone_config["climate_entity"]
                 damper_entity = zone_config["damper_entity"]
+                isolation = zone_config.get("isolation", False)
 
-                # Check entities exist, but don't skip zones during startup
-                # Entity checks during startup can be unreliable
-                climate_exists = self._entity_exists(climate_entity)
-                damper_exists = self._entity_exists(damper_entity)
-
-                if not climate_exists:
-                    self.log(
-                        f"Warning: Climate entity {climate_entity} not found during startup - will retry later"
-                    )
-
-                if not damper_exists:
-                    self.log(
-                        f"Warning: Damper entity {damper_entity} not found during startup - will retry later"
-                    )
-
-                # Create zone state even if entities aren't found yet
-                # They may become available after Home Assistant fully loads
                 zone_state = ZoneState(
                     entity_id=climate_entity,
                     damper_entity=damper_entity,
                     current_temp=0.0,
                     target_temp=0.0,
                     is_active=False,
-                    isolation=zone_config.get("isolation", False),
+                    isolation=isolation,
                 )
 
                 self.zones[zone_name] = zone_state
-                self.log(
-                    f"Initialized zone: {zone_name} (entities available: climate={climate_exists}, damper={damper_exists})"
-                )
+                self.temperature_history[zone_name] = []
 
             except KeyError as e:
-                self.log(
+                self.hass.log(
                     f"Error initializing zone {zone_name}: Missing config {e}"
                 )
             except Exception as e:
-                self.log(f"Error initializing zone {zone_name}: {e}")
-        
-        self.log(f"DEBUG: Zones initialized: {len(self.zones)} zones")
-        self.log(f"DEBUG: Zone names: {list(self.zones.keys())}")
+                self.hass.log(f"Error initializing zone {zone_name}: {e}")
 
-    def _entity_exists(self, entity_id: str) -> bool:
-        """Check if an entity exists in Home Assistant"""
-        try:
-            entity = self.get_entity(entity_id)
-            state = entity.get_state()
-            # Entity exists if state is not None and not "unavailable"
-            # During startup, entities might be "unavailable" temporarily
-            exists = state is not None and state != "unavailable"
-            self.log(
-                f"DEBUG: Entity {entity_id} exists: {exists}, state: {state}"
-            )
-            return exists
-        except Exception as e:
-            self.log(f"Error checking entity {entity_id}: {e}")
-            return False
-
-    def _validate_entities(self, kwargs):
-        """Validate all entities after Home Assistant has fully loaded"""
-        self.log("Validating entities after startup...")
-
-        # Check main climate entity using Entity API
-        try:
-            main_entity = self.get_entity(self.config.main_climate)
-            main_state = main_entity.get_state()
-            self.log(
-                f"DEBUG: Main climate {self.config.main_climate} state: {main_state}, attributes: {main_entity.attributes}"
-            )
-
-            if not self._entity_exists(self.config.main_climate):
-                self.log(
-                    f"ERROR: Main climate entity {self.config.main_climate} not found!"
-                )
-            else:
-                self.log(f"Main climate entity {self.config.main_climate} validated")
-        except Exception as e:
-            self.log(f"ERROR: Exception validating main climate entity: {e}")
-
-        # Check all zone entities
-        missing_entities = []
+    def update_all_zones(self):
+        """Update state for all zones from Home Assistant entities."""
         for zone_name, zone in self.zones.items():
             try:
-                # Debug log entity states using Entity API
-                climate_entity = self.get_entity(zone.entity_id)
-                damper_entity = self.get_entity(zone.damper_entity)
-
-                climate_state = climate_entity.get_state()
-                damper_state = damper_entity.get_state()
-
-                self.log(
-                    f"DEBUG: Zone {zone_name} climate entity {zone.entity_id}: state={climate_state}, attrs={climate_entity.attributes}",
-                    level="DEBUG",
-                )
-                self.log(
-                    f"DEBUG: Zone {zone_name} damper entity {zone.damper_entity}: state={damper_state}, attrs={damper_entity.attributes}",
-                    level="DEBUG",
-                )
-
-                climate_exists = self._entity_exists(zone.entity_id)
-                damper_exists = self._entity_exists(zone.damper_entity)
-
-                if not climate_exists:
-                    missing_entities.append(f"{zone_name}: {zone.entity_id}")
-                if not damper_exists:
-                    missing_entities.append(f"{zone_name}: {zone.damper_entity}")
-
-                if climate_exists and damper_exists:
-                    self.log(f"Zone {zone_name}: All entities validated")
-                    # Try to get initial state
-                    self._update_single_zone_state(zone_name, zone)
-                else:
-                    self.log(
-                        f"Zone {zone_name}: Missing entities - climate={climate_exists}, damper={damper_exists}",
-                        level="WARNING",
-                    )
-
+                self._update_single_zone(zone_name, zone)
             except Exception as e:
-                self.log(f"ERROR: Exception validating zone {zone_name}: {e}")
+                self.hass.log(f"Error updating zone {zone_name}: {e}")
 
-        if missing_entities:
-            self.log(
-                f"The following entities are still missing after startup: {missing_entities}",
-                level="ERROR",
-            )
-            self.log(
-                "Please check your Home Assistant configuration and entity names",
-                level="ERROR",
-            )
-        else:
-            self.log("All entities validated successfully!")
-
-    def _periodic_check(self, kwargs):
-        """Periodic check function called every check_interval seconds"""
-        self.log("DEBUG: Periodic check called")
-
-        if not self.config.enabled:
-            self.log("DEBUG: Controller disabled, skipping periodic check")
-            return
-
+    def _update_single_zone(self, zone_name: str, zone: ZoneState):
+        """Update state for a single zone."""
         try:
-            self.log("DEBUG: Starting periodic check")
-            self.last_check_time = datetime.datetime.now()
-            self._update_zone_states()
+            # Update climate entity state
+            climate_entity = self.hass.get_entity(zone.entity_id)
+            climate_state = climate_entity.get_state()
 
-            # Get current HVAC mode for logging/status only
-            current_hvac_mode = self._get_current_hvac_mode()
-            self.log(
-                f"DEBUG: Current HVAC mode: {current_hvac_mode}, Smart HVAC mode: {self.config.smart_hvac_mode}",
-                level="DEBUG",
-            )
-
-            # Determine which zones need attention based on smart_hvac_mode (desired mode)
-            if self.config.smart_hvac_mode == "heat":
-                zones_needing_attention = self._analyze_zones_for_heating()
-                target_mode = HVACMode.HEAT
-            elif self.config.smart_hvac_mode == "cool":
-                zones_needing_attention = self._analyze_zones_for_cooling()
-                target_mode = HVACMode.COOL
-            else:
-                self.log(
-                    f"Invalid smart_hvac_mode: {self.config.smart_hvac_mode}",
-                    level="ERROR",
-                )
-                return
-
-            self.log(
-                f"DEBUG: Zones needing {self.config.smart_hvac_mode}: {zones_needing_attention}",
-                level="DEBUG",
-            )
-
-            # If algorithm is already running in the correct mode
-            if self.algorithm_active and self.algorithm_mode == target_mode:
-                if self._all_zones_satisfied():
-                    self.log("Current cycle complete.")
-                    self._deactivate_algorithm()
-                else:
-                    self.log(
-                        f"DEBUG: {target_mode.value.title()} cycle continues. Letting Airtouch control dampers.",
-                        level="DEBUG",
-                    )
-                return
-
-            # If algorithm is running in wrong mode, deactivate it
-            if self.algorithm_active and self.algorithm_mode != target_mode:
-                self.log(
-                    f"Smart HVAC mode changed from {self.algorithm_mode.value} to {target_mode.value}, deactivating algorithm"
-                )
-                self._deactivate_algorithm()
-                return
-
-            # If algorithm is NOT active, start it if zones need attention
-            if zones_needing_attention:
-                self._execute_smart_algorithm(zones_needing_attention, target_mode)
-
-        except Exception as e:
-            self.log(f"Error in periodic check: {e}")
-
-    def _update_zone_states(self):
-        """Update current state of all zones using proper AppDaemon Entity API"""
-        self.log("DEBUG: Starting zone state update")
-        self.log(f"DEBUG: Number of zones to update: {len(self.zones)}")
-        self.log(f"DEBUG: Zone names: {list(self.zones.keys())}")
-
-        for zone_name, zone in self.zones.items():
-            self.log(f"DEBUG: Processing zone {zone_name}")
-            try:
-                self.log(f"DEBUG: Updating zone {zone_name} with entity {zone.entity_id}")
-
-                # Use AppDaemon Entity API for climate entity
-                climate_entity = self.get_entity(zone.entity_id)
-                climate_state = climate_entity.get_state()
-
-                self.log(
-                    f"DEBUG: Zone {zone_name} climate state: {climate_state}",
-                    level="DEBUG",
-                )
-
-                if climate_state in ["unavailable", "unknown", None]:
-                    self.log(
-                        f"WARNING: Entity {zone.entity_id} state is {climate_state}",
-                        level="WARNING",
-                    )
-                    continue
-
-                # Update zone state from climate entity
+            if climate_state not in ["unavailable", "unknown", None]:
                 zone.is_active = climate_state not in [
                     "off",
                     "unavailable",
@@ -358,7 +223,7 @@ class SmartAirconController(hass.Hass):
                     None,
                 ]
 
-                # Get temperature values from attributes
+                # Get temperature values
                 target_temp = climate_entity.attributes.get("temperature", 0.0)
                 current_temp = climate_entity.attributes.get("current_temperature", 0.0)
 
@@ -369,377 +234,22 @@ class SmartAirconController(hass.Hass):
                     float(current_temp) if current_temp is not None else 0.0
                 )
 
-                self.log(
-                    f"DEBUG: Zone {zone_name} - active: {zone.is_active}, current: {zone.current_temp}°C, target: {zone.target_temp}°C",
-                    level="DEBUG",
-                )
+            # Update damper position
+            damper_entity = self.hass.get_entity(zone.damper_entity)
+            damper_position = damper_entity.attributes.get("current_position", 0)
+            zone.damper_position = (
+                int(damper_position) if damper_position is not None else 0
+            )
 
-                # Use AppDaemon Entity API for damper entity
-                damper_entity = self.get_entity(zone.damper_entity)
-                damper_position = damper_entity.attributes.get("current_position", 0)
-                zone.damper_position = (
-                    int(damper_position) if damper_position is not None else 0
-                )
+            # Update temperature history
+            self._update_temperature_history(zone_name, zone.current_temp)
 
-                self.log(f"DEBUG: Zone {zone_name} damper position: {zone.damper_position}%")
-
-                # Track temperature history for fallback mechanism
-                self._update_temperature_history(zone_name, zone.current_temp)
-                
-                self.log(f"DEBUG: Zone {zone_name} update completed successfully")
-
-            except (ValueError, TypeError) as e:
-                self.log(f"Error processing state for zone {zone_name}: {e}")
-            except Exception as e:
-                self.log(f"Error updating zone {zone_name}: {e}")
-                self.log(
-                    f"DEBUG: Full exception: {type(e).__name__}: {str(e)}",
-                    level="DEBUG",
-                )
-
-    def _get_current_hvac_mode(self) -> str:
-        """Get the current HVAC mode from the main climate entity"""
-        try:
-            main_entity = self.get_entity(self.config.main_climate)
-            current_mode = main_entity.get_state()
-            return current_mode if current_mode else "unknown"
         except Exception as e:
-            self.log(f"Error getting current HVAC mode: {e}")
-            return "unknown"
-
-    def _analyze_zones_for_heating(self) -> List[str]:
-        """Analyze zones to determine which need heating"""
-        zones_needing_heating = []
-
-        for zone_name, zone in self.zones.items():
-            if not zone.is_active:
-                continue
-
-            # Check if zone needs heating
-            if zone.current_temp <= (zone.target_temp - self.config.temp_tolerance):
-                zones_needing_heating.append(zone_name)
-                self.log(
-                    f"Zone {zone_name} needs heating: {zone.current_temp}°C <= {zone.target_temp - self.config.temp_tolerance}°C"
-                )
-
-        return zones_needing_heating
-
-    def _analyze_zones_for_cooling(self) -> List[str]:
-        """Analyze zones to determine which need cooling"""
-        zones_needing_cooling = []
-
-        for zone_name, zone in self.zones.items():
-            if not zone.is_active:
-                continue
-
-            # Check if zone needs cooling
-            if zone.current_temp >= (zone.target_temp + self.config.temp_tolerance):
-                zones_needing_cooling.append(zone_name)
-                self.log(
-                    f"Zone {zone_name} needs cooling: {zone.current_temp}°C >= {zone.target_temp + self.config.temp_tolerance}°C"
-                )
-
-        return zones_needing_cooling
-
-    def _analyze_zones(self) -> Tuple[List[str], List[str]]:
-        """Legacy method - kept for compatibility"""
-        return self._analyze_zones_for_heating(), self._analyze_zones_for_cooling()
-
-    def _execute_smart_algorithm(self, trigger_zones: List[str], mode: HVACMode):
-        """Execute the smart heating/cooling algorithm"""
-        self.log(f"Executing smart {mode.value} algorithm for zones: {trigger_zones}")
-
-        # Calculate damper positions for all active zones
-        damper_positions = self._calculate_damper_positions(trigger_zones, mode)
-
-        # Set HVAC to the appropriate mode for energy efficiency
-        self._set_hvac_mode(mode)
-
-        # Apply damper positions
-        self._apply_damper_positions(damper_positions)
-
-        self.algorithm_active = True
-        self.algorithm_mode = mode
-
-        # Set start time for fallback mechanism
-        if not self.algorithm_start_time:
-            self.algorithm_start_time = datetime.datetime.now()
-            self.last_progress_time = datetime.datetime.now()
-            self.log(
-                f"Algorithm started at {self.algorithm_start_time}, tracking for fallback"
-            )
-
-    def _calculate_damper_positions(
-        self, trigger_zones: List[str], mode: HVACMode
-    ) -> Dict[str, int]:
-        """Calculate optimal damper positions for all zones"""
-        damper_positions = {}
-
-        for zone_name, zone in self.zones.items():
-            if not zone.is_active:
-                damper_positions[zone_name] = 0
-                continue
-
-            if zone.isolation and zone_name not in trigger_zones:
-                # Isolated zones don't participate unless they are a trigger
-                # But still need minimum damper to keep zone active
-                damper_positions[zone_name] = self.config.minimum_damper_percent
-                continue
-
-            if zone_name in trigger_zones:
-                # Primary trigger zone gets full damper opening
-                damper_positions[zone_name] = self.config.primary_damper_percent
-            else:
-                # Calculate damper position for secondary zones
-                if mode == HVACMode.HEAT:
-                    # For heating: leverage heat to bring zones up to target + tolerance
-                    max_desired_temp = zone.target_temp + self.config.temp_tolerance
-
-                    if zone.current_temp < max_desired_temp:
-                        # Zone can benefit from heating (below target + tolerance)
-                        if zone.current_temp < zone.target_temp:
-                            # Zone is below target - give it secondary damper percentage
-                            damper_positions[zone_name] = (
-                                self.config.secondary_damper_percent
-                            )
-                        else:
-                            # Zone is above target but below target + tolerance - minimal damper
-                            damper_positions[zone_name] = (
-                                self.config.overflow_damper_percent
-                            )
-                    else:
-                        # Zone is at or above target + tolerance - minimum damper to keep active
-                        damper_positions[zone_name] = self.config.minimum_damper_percent
-
-                else:  # COOL mode
-                    # For cooling: leverage cooling to bring zones down to target - tolerance
-                    min_desired_temp = zone.target_temp - self.config.temp_tolerance
-
-                    if zone.current_temp > min_desired_temp:
-                        # Zone can benefit from cooling (above target - tolerance)
-                        if zone.current_temp > zone.target_temp:
-                            # Zone is above target - give it secondary damper percentage
-                            damper_positions[zone_name] = (
-                                self.config.secondary_damper_percent
-                            )
-                        else:
-                            # Zone is below target but above target - tolerance - minimal damper
-                            damper_positions[zone_name] = (
-                                self.config.overflow_damper_percent
-                            )
-                    else:
-                        # Zone is at or below target - tolerance - minimum damper to keep active
-                        damper_positions[zone_name] = self.config.minimum_damper_percent
-
-        return damper_positions
-
-    def _apply_damper_positions(self, positions: Dict[str, int]):
-        """Apply calculated damper positions"""
-        for zone_name, position in positions.items():
-            if zone_name not in self.zones:
-                continue
-
-            zone = self.zones[zone_name]
-            try:
-                # Always set position - never close dampers for active zones
-                self.call_service(
-                    "cover/set_cover_position",
-                    entity_id=zone.damper_entity,
-                    position=position,
-                )
-                self.log(f"Set {zone_name} damper to {position}%")
-
-            except Exception as e:
-                self.log(f"Error setting damper for {zone_name}: {e}")
-
-    def _set_hvac_mode(self, mode: HVACMode):
-        """Set the main HVAC system mode"""
-        try:
-            main_entity = self.get_entity(self.config.main_climate)
-            current_mode = main_entity.get_state()
-
-            if current_mode != mode.value:
-                self.call_service(
-                    "climate/set_hvac_mode",
-                    entity_id=self.config.main_climate,
-                    hvac_mode=mode.value,
-                )
-                self.current_hvac_mode = mode.value
-                self.log(f"Set HVAC mode to {mode.value}")
-        except Exception as e:
-            self.log(f"Error setting HVAC mode: {e}")
-
-    def _all_zones_satisfied(self) -> bool:
-        """Check if all active zones are satisfied, with fallback for Airtouch interference"""
-        if not self.algorithm_mode or not self.algorithm_start_time:
-            return True  # Should not happen if algorithm is active
-
-        now = datetime.datetime.now()
-        algorithm_runtime = now - self.algorithm_start_time
-
-        # Primary criteria: All zones reach target + tolerance (ideal case)
-        primary_satisfied = self._check_primary_satisfaction()
-        if primary_satisfied:
-            self.log("All zones satisfied - primary criteria met")
-            return True
-
-        # If algorithm has run for minimum time, check fallback criteria
-        min_runtime_minutes = 5  # Allow at least 5 minutes before considering fallback
-        if algorithm_runtime.total_seconds() >= min_runtime_minutes * 60:
-            fallback_satisfied = self._check_fallback_satisfaction(
-                now, algorithm_runtime
-            )
-            if fallback_satisfied:
-                return True
-
-        return False
-
-    def _check_primary_satisfaction(self) -> bool:
-        """Check primary satisfaction criteria (target + tolerance)"""
-        for zone_name, zone in self.zones.items():
-            if not zone.is_active:
-                continue
-
-            if self.algorithm_mode == HVACMode.HEAT:
-                # Satisfied if temp is at or slightly above target
-                temp_min = zone.target_temp
-                temp_max = zone.target_temp + self.config.temp_tolerance
-                if not (temp_min <= zone.current_temp <= temp_max):
-                    return False
-
-            elif self.algorithm_mode == HVACMode.COOL:
-                # Satisfied if temp is at or slightly below target
-                temp_min = zone.target_temp - self.config.temp_tolerance
-                temp_max = zone.target_temp
-                if not (temp_min <= zone.current_temp <= temp_max):
-                    return False
-
-        return True
-
-    def _check_fallback_satisfaction(
-        self, now: datetime.datetime, algorithm_runtime: datetime.timedelta
-    ) -> bool:
-        """Check fallback criteria for when Airtouch interferes with our algorithm"""
-
-        # Fallback criteria 1: Maximum timeout reached
-        if (
-            algorithm_runtime.total_seconds()
-            >= self.config.algorithm_timeout_minutes * 60
-        ):
-            self.log(
-                f"Fallback: Algorithm timeout reached ({self.config.algorithm_timeout_minutes} minutes)"
-            )
-            return True
-
-        # Check if all zones are at least at target (not target + tolerance)
-        zones_at_target = self._all_zones_at_target()
-        if not zones_at_target:
-            return False  # Can't use fallback if zones aren't even at target
-
-        # Fallback criteria 2: No progress for extended time
-        if self.last_progress_time:
-            time_since_progress = now - self.last_progress_time
-            if (
-                time_since_progress.total_seconds()
-                >= self.config.progress_timeout_minutes * 60
-            ):
-                self.log(
-                    f"Fallback: No progress for {self.config.progress_timeout_minutes} minutes - Airtouch likely controlling dampers"
-                )
-                return True
-
-        # Fallback criteria 3: Temperature stability (zones stable for extended time)
-        if self._zones_stable_for_time(now, self.config.stability_check_minutes):
-            self.log(
-                f"Fallback: Zones stable for {self.config.stability_check_minutes} minutes - assuming Airtouch control"
-            )
-            return True
-
-        # Fallback criteria 4: Most dampers closed (indicating Airtouch control)
-        if self._most_dampers_closed():
-            self.log("Fallback: Most dampers closed - Airtouch has taken control")
-            return True
-
-        return False
-
-    def _all_zones_at_target(self) -> bool:
-        """Check if all active zones are at least at their target temperature"""
-        for zone_name, zone in self.zones.items():
-            if not zone.is_active:
-                continue
-
-            if self.algorithm_mode == HVACMode.HEAT:
-                if zone.current_temp < zone.target_temp:
-                    return False
-            elif self.algorithm_mode == HVACMode.COOL:
-                if zone.current_temp > zone.target_temp:
-                    return False
-        return True
-
-    def _zones_stable_for_time(self, now: datetime.datetime, minutes: int) -> bool:
-        """Check if zones have been stable (within 0.1°C) for specified time"""
-        stability_threshold = 0.1  # 0.1°C stability threshold
-        check_time = now - datetime.timedelta(minutes=minutes)
-
-        for zone_name, zone in self.zones.items():
-            if not zone.is_active:
-                continue
-
-            if zone_name not in self.temperature_history:
-                return False
-
-            # Get readings from the stability check period
-            stable_readings = [
-                temp
-                for time, temp in self.temperature_history[zone_name]
-                if time >= check_time
-            ]
-
-            if len(stable_readings) < 3:  # Need enough data points
-                return False
-
-            # Check if temperature has been stable
-            min_temp = min(stable_readings)
-            max_temp = max(stable_readings)
-            if max_temp - min_temp > stability_threshold:
-                return False
-
-        return True
-
-    def _most_dampers_closed(self) -> bool:
-        """Check if most active zone dampers are closed (≤10%)"""
-        active_zones = [zone for zone in self.zones.values() if zone.is_active]
-        if not active_zones:
-            return False
-
-        closed_dampers = sum(1 for zone in active_zones if zone.damper_position <= 10)
-        return closed_dampers >= len(active_zones) * 0.7  # 70% or more closed
-
-    def _deactivate_algorithm(self):
-        """Deactivate the smart algorithm and return to idle mode"""
-        self.log("All zones satisfied, deactivating algorithm")
-
-        # Set HVAC to idle mode
-        self._set_hvac_mode(HVACMode.DRY)
-
-        # Close all dampers gradually (let Airtouch handle it)
-        # We don't force close dampers to let the normal system take over
-
-        self.algorithm_active = False
-        self.algorithm_mode = None
-
-        # Reset fallback tracking
-        self.algorithm_start_time = None
-        self.temperature_history.clear()
-        self.last_progress_time = None
+            self.hass.log(f"Error updating single zone {zone_name}: {e}")
 
     def _update_temperature_history(self, zone_name: str, current_temp: float):
-        """Update temperature history for fallback mechanism"""
+        """Update temperature history for a zone."""
         now = datetime.datetime.now()
-
-        # Initialize history for new zones
-        if zone_name not in self.temperature_history:
-            self.temperature_history[zone_name] = []
 
         # Add current reading
         self.temperature_history[zone_name].append((now, current_temp))
@@ -752,117 +262,742 @@ class SmartAirconController(hass.Hass):
             if time > cutoff_time
         ]
 
-        # Check for progress (used for fallback)
-        if self.algorithm_active and len(self.temperature_history[zone_name]) >= 2:
-            # Get temperature from 5 minutes ago
-            five_min_ago = now - datetime.timedelta(minutes=5)
-            old_readings = [
-                (time, temp)
-                for time, temp in self.temperature_history[zone_name]
-                if time <= five_min_ago
-            ]
-
-            if old_readings:
-                old_temp = old_readings[-1][1]  # Most recent old reading
-                progress_threshold = 0.1  # 0.1°C progress threshold
-
-                if self.algorithm_mode == HVACMode.HEAT:
-                    # Progress means temperature is increasing
-                    if current_temp > old_temp + progress_threshold:
-                        self.last_progress_time = now
-                elif self.algorithm_mode == HVACMode.COOL:
-                    # Progress means temperature is decreasing
-                    if current_temp < old_temp - progress_threshold:
-                        self.last_progress_time = now
-
-    def toggle_controller(self, state: bool):
-        """Enable or disable the smart controller"""
-        self.config.enabled = state
-        self.log(f"Smart controller {'enabled' if state else 'disabled'}")
-
-        if not state and self.algorithm_active:
-            self._deactivate_algorithm()
-
-    def set_smart_hvac_mode(self, mode: str):
-        """Set the desired HVAC mode (heat or cool)"""
-        if mode not in ["heat", "cool"]:
-            self.log(
-                f"Invalid smart HVAC mode: {mode}. Must be 'heat' or 'cool'",
-                level="ERROR",
-            )
-            return
-
-        old_mode = self.config.smart_hvac_mode
-        self.config.smart_hvac_mode = mode
-        self.log(f"Smart HVAC mode changed from {old_mode} to {mode}")
-
-        # If algorithm is active in wrong mode, deactivate it
-        if self.algorithm_active and self.algorithm_mode:
-            if (mode == "heat" and self.algorithm_mode != HVACMode.HEAT) or (
-                mode == "cool" and self.algorithm_mode != HVACMode.COOL
-            ):
-                self.log("Deactivating algorithm due to mode change")
-                self._deactivate_algorithm()
-
-    def _update_single_zone_state(self, zone_name: str, zone: ZoneState):
-        """Update state for a single zone - helper method for debugging"""
+    def update_hvac_mode(self):
+        """Update current HVAC mode from main climate entity."""
         try:
-            climate_entity = self.get_entity(zone.entity_id)
-            climate_state = climate_entity.get_state()
+            main_entity = self.hass.get_entity(self.config.main_climate)
+            self.current_hvac_mode = main_entity.get_state()
+        except Exception as e:
+            self.hass.log(f"Error getting HVAC mode: {e}")
+            self.current_hvac_mode = "unknown"
 
-            if climate_state not in ["unavailable", "unknown", None]:
-                zone.is_active = climate_state not in [
-                    "off",
-                    "unavailable",
-                    "unknown",
-                    None,
-                ]
-                zone.target_temp = float(
-                    climate_entity.attributes.get("temperature", 0.0)
-                )
-                zone.current_temp = float(
-                    climate_entity.attributes.get("current_temperature", 0.0)
-                )
+    def get_active_zones(self) -> List[str]:
+        """Get list of active zone names."""
+        return [name for name, zone in self.zones.items() if zone.is_active]
 
-            # Get damper position
-            damper_entity = self.get_entity(zone.damper_entity)
-            zone.damper_position = int(
-                damper_entity.attributes.get("current_position", 0)
+    def get_zones_needing_heating(self) -> List[str]:
+        """Get zones that need heating (temp < target - tolerance)."""
+        if self.config.smart_hvac_mode != "heat":
+            return []
+
+        zones_needing_heat = []
+        threshold_temp = lambda target: target - self.config.temp_tolerance
+
+        for zone_name, zone in self.zones.items():
+            if zone.is_active and zone.current_temp < threshold_temp(zone.target_temp):
+                zones_needing_heat.append(zone_name)
+
+        return zones_needing_heat
+
+    def get_zones_needing_cooling(self) -> List[str]:
+        if self.config.smart_hvac_mode != "cool":
+            return []
+        """Get zones that need cooling (temp > target + tolerance)."""
+        zones_needing_cool = []
+        threshold_temp = lambda target: target + self.config.temp_tolerance
+
+        for zone_name, zone in self.zones.items():
+            if zone.is_active and zone.current_temp > threshold_temp(zone.target_temp):
+                zones_needing_cool.append(zone_name)
+
+        return zones_needing_cool
+
+    def all_zones_satisfied(self, mode: HVACMode) -> bool:
+        """Check if all active zones are satisfied for the given mode."""
+        for zone_name, zone in self.zones.items():
+            if not zone.is_active:
+                continue
+
+            if mode == HVACMode.HEAT:
+                # Satisfied if temp > target (exceeded target)
+                if zone.current_temp <= zone.target_temp:
+                    return False
+            elif mode == HVACMode.COOL:
+                # Satisfied if temp < target (cooled below target)
+                if zone.current_temp >= zone.target_temp:
+                    return False
+
+        return True
+
+    def all_dampers_low(self, threshold: int = 10) -> bool:
+        """Check if all active zone dampers are below threshold."""
+        active_zones = [zone for zone in self.zones.values() if zone.is_active]
+        if not active_zones:
+            return True
+
+        return all(zone.damper_position <= threshold for zone in active_zones)
+
+    def is_temperature_stable(
+        self, zone_name: str, minutes: int = 5, threshold: float = 0.1
+    ) -> bool:
+        """Check if zone temperature has been stable for given time."""
+        if zone_name not in self.temperature_history:
+            return False
+
+        now = datetime.datetime.now()
+        check_time = now - datetime.timedelta(minutes=minutes)
+
+        # Get readings from the stability check period
+        stable_readings = [
+            temp
+            for time, temp in self.temperature_history[zone_name]
+            if time >= check_time
+        ]
+
+        if len(stable_readings) < 3:  # Need enough data points
+            return False
+
+        # Check if temperature has been stable within threshold
+        min_temp = min(stable_readings)
+        max_temp = max(stable_readings)
+        return max_temp - min_temp <= threshold
+
+    def get_zone_state(self, zone_name: str) -> Optional[ZoneState]:
+        """Get state for a specific zone."""
+        return self.zones.get(zone_name)
+
+    def get_all_zone_states(self) -> Dict[str, ZoneState]:
+        """Get all zone states."""
+        return self.zones.copy()
+
+    def is_zone_isolated(self, zone_name: str) -> bool:
+        """Check if zone is isolated."""
+        zone = self.zones.get(zone_name)
+        return zone.isolation if zone else False
+
+
+class DecisionEngine:
+    """Makes all control decisions based on current state."""
+
+    def __init__(self, config: ControllerConfig):
+        self.config = config
+
+    def get_idle_mode(self, smart_hvac_mode: str) -> HVACMode:
+        """Get appropriate idle mode based on smart HVAC mode"""
+        if smart_hvac_mode == "heat":
+            return HVACMode.DRY
+        elif smart_hvac_mode == "cool":
+            return HVACMode.FAN
+        else:
+            return HVACMode.DRY  # Default fallback
+
+    def should_activate_heating(self, state_manager: StateManager) -> bool:
+        """Determine if heating should be activated."""
+        if self.config.smart_hvac_mode != "heat":
+            return False
+
+        zones_needing_heat = state_manager.get_zones_needing_heating()
+        return len(zones_needing_heat) > 0
+
+    def should_activate_cooling(self, state_manager: StateManager) -> bool:
+        """Determine if cooling should be activated."""
+        if self.config.smart_hvac_mode != "cool":
+            return False
+
+        zones_needing_cool = state_manager.get_zones_needing_cooling()
+        return len(zones_needing_cool) > 0
+
+    def should_switch_to_idle(
+        self, state_manager: StateManager, current_mode: HVACMode
+    ) -> bool:
+        """Determine if system should switch to idle mode."""
+        if current_mode == HVACMode.HEAT:
+            # Switch to DRY if all zones satisfied and dampers are low
+            return (
+                state_manager.all_zones_satisfied(HVACMode.HEAT)
+                and state_manager.all_dampers_low()
             )
+        elif current_mode == HVACMode.COOL:
+            # Switch to FAN if all zones satisfied and dampers are low
+            return (
+                state_manager.all_zones_satisfied(HVACMode.COOL)
+                and state_manager.all_dampers_low()
+            )
+
+        return False
+
+    def get_target_hvac_mode(self, state_manager: StateManager) -> HVACMode:
+        """Get the target HVAC mode based on current state."""
+        if self.config.smart_hvac_mode == "heat":
+            if self.should_activate_heating(state_manager):
+                return HVACMode.HEAT
+            else:
+                return self.get_idle_mode("heat")
+        elif self.config.smart_hvac_mode == "cool":
+            if self.should_activate_cooling(state_manager):
+                return HVACMode.COOL
+            else:
+                return self.get_idle_mode("cool")
+
+        return self.get_idle_mode("heat")  # Default fallback
+
+    def calculate_damper_positions(
+        self, state_manager: StateManager, trigger_zones: List[str], mode: HVACMode
+    ) -> Dict[str, int]:
+        """Calculate optimal damper positions for all zones."""
+        damper_positions = {}
+
+        for zone_name, zone in state_manager.get_all_zone_states().items():
+            if not zone.is_active:
+                damper_positions[zone_name] = 0
+                continue
+
+            # Always maintain minimum damper for active zones
+            min_damper = self.config.minimum_damper_percent
+
+            if zone.isolation and zone_name not in trigger_zones:
+                # Isolated zones only get minimum unless they triggered
+                damper_positions[zone_name] = min_damper
+                continue
+
+            if zone_name in trigger_zones:
+                # Primary trigger zone gets full opening
+                damper_positions[zone_name] = self.config.primary_damper_percent
+            else:
+                # Calculate secondary zone damper based on need
+                damper_positions[zone_name] = self._calculate_secondary_damper(
+                    zone, mode, min_damper
+                )
+
+        return damper_positions
+
+    def _calculate_secondary_damper(
+        self, zone: ZoneState, mode: HVACMode, min_damper: int
+    ) -> int:
+        """Calculate damper position for secondary zones."""
+        if mode == HVACMode.HEAT:
+            max_desired_temp = zone.target_temp + self.config.temp_tolerance
+
+            if zone.current_temp < max_desired_temp:
+                if zone.current_temp < zone.target_temp:
+                    # Zone below target - secondary damper
+                    return self.config.secondary_damper_percent
+                else:
+                    # Zone above target but below max - overflow damper
+                    return self.config.overflow_damper_percent
+            else:
+                # Zone at or above max - minimum damper
+                return min_damper
+
+        elif mode == HVACMode.COOL:
+            min_desired_temp = zone.target_temp - self.config.temp_tolerance
+
+            if zone.current_temp > min_desired_temp:
+                if zone.current_temp > zone.target_temp:
+                    # Zone above target - secondary damper
+                    return self.config.secondary_damper_percent
+                else:
+                    # Zone below target but above min - overflow damper
+                    return self.config.overflow_damper_percent
+            else:
+                # Zone at or below min - minimum damper
+                return min_damper
+
+        return min_damper
+
+
+class Executor:
+    """Executes decisions via Home Assistant API calls."""
+
+    def __init__(self, hass_api, config: ControllerConfig):
+        self.hass = hass_api
+        self.config = config
+
+    def set_hvac_mode(self, mode: HVACMode):
+        """Set the main HVAC system mode."""
+        try:
+            self.hass.call_service(
+                "climate/set_hvac_mode",
+                entity_id=self.config.main_climate,
+                hvac_mode=mode.value,
+            )
+            self.hass.log(f"Set HVAC mode to {mode.value}")
+        except Exception as e:
+            self.hass.log(f"Error setting HVAC mode to {mode.value}: {e}")
+
+    def set_damper_positions(
+        self, positions: Dict[str, int], state_manager: StateManager
+    ):
+        """Set damper positions for all zones."""
+        for zone_name, position in positions.items():
+            zone = state_manager.get_zone_state(zone_name)
+            if not zone:
+                continue
+
+            try:
+                self.hass.call_service(
+                    "cover/set_cover_position",
+                    entity_id=zone.damper_entity,
+                    position=position,
+                )
+                self.hass.log(f"Set {zone_name} damper to {position}%")
+            except Exception as e:
+                self.hass.log(f"Error setting damper for {zone_name}: {e}")
+
+    def set_minimum_dampers(self, state_manager: StateManager):
+        """Set all active zone dampers to minimum position."""
+        positions = {}
+        for zone_name, zone in state_manager.get_all_zone_states().items():
+            if zone.is_active:
+                positions[zone_name] = self.config.minimum_damper_percent
+
+        self.set_damper_positions(positions, state_manager)
+
+
+class Monitor:
+    """Monitors system health and implements fallback logic."""
+
+    def __init__(self, config: ControllerConfig):
+        self.config = config
+        self.algorithm_start_time: Optional[datetime.datetime] = None
+        self.last_progress_time: Optional[datetime.datetime] = None
+
+    def start_monitoring(self):
+        """Start monitoring algorithm execution."""
+        self.algorithm_start_time = datetime.datetime.now()
+        self.last_progress_time = datetime.datetime.now()
+
+    def stop_monitoring(self):
+        """Stop monitoring and reset timers."""
+        self.algorithm_start_time = None
+        self.last_progress_time = None
+
+    def check_progress(self, state_manager: StateManager, mode: HVACMode) -> bool:
+        """Check if algorithm is making progress."""
+        if not self.algorithm_start_time:
+            return True
+
+        now = datetime.datetime.now()
+
+        # Check for any temperature progress in the last 5 minutes
+        for zone_name, zone in state_manager.get_all_zone_states().items():
+            if not zone.is_active:
+                continue
+
+            if self._zone_making_progress(state_manager, zone_name, mode, now):
+                self.last_progress_time = now
+                return True
+
+        return True  # Assume progress if we can't determine otherwise
+
+    def _zone_making_progress(
+        self,
+        state_manager: StateManager,
+        zone_name: str,
+        mode: HVACMode,
+        now: datetime.datetime,
+    ) -> bool:
+        """Check if a specific zone is making temperature progress."""
+        if zone_name not in state_manager.temperature_history:
+            return False
+
+        # Get temperature from 5 minutes ago
+        five_min_ago = now - datetime.timedelta(minutes=5)
+        old_readings = [
+            (time, temp)
+            for time, temp in state_manager.temperature_history[zone_name]
+            if time <= five_min_ago
+        ]
+
+        if not old_readings:
+            return False
+
+        old_temp = old_readings[-1][1]  # Most recent old reading
+        current_temp = state_manager.get_zone_state(zone_name).current_temp
+        progress_threshold = 0.1  # 0.1°C progress threshold
+
+        if mode == HVACMode.HEAT:
+            return current_temp > old_temp + progress_threshold
+        elif mode == HVACMode.COOL:
+            return current_temp < old_temp - progress_threshold
+
+        return False
+
+    def should_fallback(self, state_manager: StateManager) -> bool:
+        """Check if fallback mechanisms should be triggered."""
+        if not self.algorithm_start_time:
+            return False
+
+        now = datetime.datetime.now()
+        runtime = now - self.algorithm_start_time
+
+        # Fallback 1: Maximum timeout reached
+        if runtime.total_seconds() >= self.config.algorithm_timeout_minutes * 60:
+            return True
+
+        # Fallback 2: No progress for extended time
+        if self.last_progress_time:
+            time_since_progress = now - self.last_progress_time
+            if (
+                time_since_progress.total_seconds()
+                >= self.config.progress_timeout_minutes * 60
+            ):
+                return True
+
+        return False
+
+
+class SmartAirconController(hass.Hass):
+    """
+    Smart Aircon Controller V2 - Simplified Implementation
+
+    Main controller that orchestrates all components for energy-efficient
+    heating/cooling with clean separation of concerns.
+    """
+
+    def initialize(self):
+        """Initialize the smart aircon controller."""
+        self.log("Initializing Smart Aircon Controller V2")
+
+        # Load static configuration
+        self.static_config = self._load_static_config()
+
+        # Initialize dynamic configuration manager
+        config_entities = self.args.get("config_entities", {})
+        config_defaults = self.args.get("config_defaults", {})
+
+        if not config_entities:
+            raise ValueError(
+                "config_entities is required. Please see home_assistant_config.yaml for required helper entities."
+            )
+
+        self.log("Using dynamic configuration from Home Assistant entities")
+        self.config_manager = ConfigManager(self, config_entities, config_defaults)
+
+        # Initialize components
+        config = self.config_manager.get_config()
+        self.state_manager = StateManager(self, config, self.args.get("zones", {}))
+        self.decision_engine = DecisionEngine(config)
+        self.executor = Executor(self, config)
+        self.monitor = Monitor(config)
+
+        # Algorithm state
+        self.algorithm_active = False
+        self.current_algorithm_mode: Optional[HVACMode] = None
+
+        # Set up periodic checking
+        self.run_every(
+            self._periodic_check,
+            "now+10",
+            self.static_config.check_interval,
+        )
+        self.log(
+            f"Controller initialized - checking every {self.static_config.check_interval} seconds"
+        )
+
+        # Validate entities after startup
+        self.run_in(self._validate_entities, 30)
+
+    def _load_static_config(self) -> ControllerConfig:
+        """Load static configuration that requires restart to change."""
+        return ControllerConfig(
+            check_interval=self.args.get("check_interval", 30),
+            main_climate=self.args.get("main_climate", "climate.aircon"),
+            algorithm_timeout_minutes=self.args.get("algorithm_timeout_minutes", 30),
+            stability_check_minutes=self.args.get("stability_check_minutes", 10),
+            progress_timeout_minutes=self.args.get("progress_timeout_minutes", 15),
+        )
+
+    def _validate_entities(self, kwargs):
+        """Validate all entities after Home Assistant has fully loaded."""
+        self.log("Validating entities...")
+
+        # Check main climate entity
+        try:
+            main_entity = self.get_entity(self.static_config.main_climate)
+            if main_entity.get_state() in ["unavailable", "unknown", None]:
+                self.log(
+                    f"WARNING: Main climate entity {self.static_config.main_climate} not available"
+                )
+            else:
+                self.log("Main climate entity validated")
+        except Exception as e:
+            self.log(f"ERROR: Main climate entity validation failed: {e}")
+
+        # Check zone entities
+        missing_entities = []
+        for zone_name, zone in self.state_manager.zones.items():
+            try:
+                climate_entity = self.get_entity(zone.entity_id)
+                damper_entity = self.get_entity(zone.damper_entity)
+
+                if climate_entity.get_state() in ["unavailable", "unknown", None]:
+                    missing_entities.append(f"{zone_name} climate: {zone.entity_id}")
+
+                if damper_entity.get_state() in ["unavailable", "unknown", None]:
+                    missing_entities.append(f"{zone_name} damper: {zone.damper_entity}")
+
+            except Exception as e:
+                missing_entities.append(f"{zone_name}: {e}")
+
+        if missing_entities:
+            self.log(f"WARNING: Missing entities: {missing_entities}")
+        else:
+            self.log("All entities validated successfully")
+
+    def _periodic_check(self, kwargs):
+        """Periodic check function called every check_interval seconds."""
+        try:
+            self.log("=== PERIODIC CHECK START ===")
+
+            # Update dynamic configuration
+            if self.config_manager.should_update():
+                self.log("Updating dynamic configuration from HA entities")
+                config_changed = self.config_manager.update_config()
+                if config_changed:
+                    self.log("Configuration changed, updating components")
+                    # Update components with new config
+                    current_config = self.config_manager.get_config()
+                    self.decision_engine.config = current_config
+                    self.state_manager.config = current_config
+                    self.executor.config = current_config
+                    self.monitor.config = current_config
+            current_config = self.config_manager.get_config()
+
+            self.log(
+                f"Controller enabled: {current_config.enabled}, Smart HVAC mode: {current_config.smart_hvac_mode}"
+            )
+
+            # Check if controller is enabled
+            if not current_config.enabled:
+                self.log("Controller is disabled")
+                if self.algorithm_active:
+                    self.log("Controller disabled, deactivating algorithm")
+                    self._deactivate_algorithm()
+                else:
+                    self.log("Algorithm already inactive")
+                return
+
+            # Update all state
+            self.log("Updating zone states and HVAC mode")
+            self.state_manager.update_all_zones()
+            self.state_manager.update_hvac_mode()
+
+            # Log current state
+            active_zones = self.state_manager.get_active_zones()
+            self.log(f"Current HVAC mode: {self.state_manager.current_hvac_mode}")
+            self.log(f"Active zones: {active_zones}")
+
+            # Log zone details
+            for zone_name, zone in self.state_manager.zones.items():
+                if zone.is_active:
+                    self.log(
+                        f"Zone {zone_name}: {zone.current_temp}°C -> {zone.target_temp}°C (damper: {zone.damper_position}%)"
+                    )
+
+            # Check zone needs
+            zones_needing_heat = self.state_manager.get_zones_needing_heating()
+            zones_needing_cool = self.state_manager.get_zones_needing_cooling()
+            self.log(f"Zones needing heat: {zones_needing_heat}")
+            self.log(f"Zones needing cool: {zones_needing_cool}")
+
+            # Get target mode from decision engine
+            target_mode = self.decision_engine.get_target_hvac_mode(self.state_manager)
+            self.log(f"Target HVAC mode: {target_mode.value}")
+            self.log(
+                f"Algorithm active: {self.algorithm_active}, Current algorithm mode: {self.current_algorithm_mode.value if self.current_algorithm_mode else 'None'}"
+            )
+
+            # Check if we need to activate algorithm or switch to idle
+            if not self.algorithm_active:
+                self.log("Algorithm is inactive, checking if activation needed")
+                if self._should_activate_algorithm(target_mode):
+                    self.log(
+                        f"Algorithm activation triggered for {target_mode.value} mode"
+                    )
+                    self._activate_algorithm(target_mode)
+                elif self._should_switch_to_idle_mode(target_mode):
+                    self.log(f"Switching to idle mode: {target_mode.value}")
+                    self._switch_to_idle_mode(target_mode)
+                else:
+                    self.log("No algorithm activation or mode change needed")
+            else:
+                self.log("Algorithm is active, checking if deactivation needed")
+                # Algorithm is active - check if we should deactivate
+                if self._should_deactivate_algorithm(target_mode):
+                    self.log("Algorithm deactivation triggered")
+                    self._deactivate_algorithm()
+                else:
+                    self.log("Algorithm continues running, checking progress")
+                    # Continue monitoring
+                    progress_ok = self.monitor.check_progress(
+                        self.state_manager, self.current_algorithm_mode
+                    )
+                    self.log(f"Progress check result: {progress_ok}")
+
+                    if self.monitor.should_fallback(self.state_manager):
+                        self.log("Fallback triggered - deactivating algorithm")
+                        self._deactivate_algorithm()
+                    else:
+                        self.log("Algorithm monitoring continues")
+
+            self.log("=== PERIODIC CHECK END ===")
 
         except Exception as e:
-            self.log(f"Error updating single zone {zone_name}: {e}")
+            self.log(f"Error in periodic check: {e}")
+
+    def _should_activate_algorithm(self, target_mode: HVACMode) -> bool:
+        """Determine if algorithm should be activated."""
+        current_mode = self.state_manager.current_hvac_mode
+        self.log(
+            f"Checking activation: target={target_mode.value}, current={current_mode}"
+        )
+
+        # Activate if target mode requires heating/cooling and current mode is idle
+        if target_mode in [HVACMode.HEAT, HVACMode.COOL]:
+            if (
+                current_mode in ["dry", "fan", "off"]
+                or current_mode != target_mode.value
+            ):
+                self.log(
+                    f"Activation needed: target mode {target_mode.value} requires active heating/cooling"
+                )
+                return True
+            else:
+                self.log(f"No activation needed: already in {target_mode.value} mode")
+        else:
+            self.log(
+                f"No activation needed: target mode {target_mode.value} is idle mode"
+            )
+
+        return False
+
+    def _should_deactivate_algorithm(self, target_mode: HVACMode) -> bool:
+        """Determine if algorithm should be deactivated."""
+        self.log(
+            f"Checking deactivation: target={target_mode.value}, current_algorithm={self.current_algorithm_mode.value if self.current_algorithm_mode else 'None'}"
+        )
+
+        # Deactivate if target mode is idle (DRY/FAN)
+        if target_mode in [HVACMode.DRY, HVACMode.FAN]:
+            should_switch = self.decision_engine.should_switch_to_idle(
+                self.state_manager, self.current_algorithm_mode
+            )
+            self.log(f"Target is idle mode, should_switch_to_idle: {should_switch}")
+            return should_switch
+        else:
+            self.log(f"Target mode {target_mode.value} is active mode, no deactivation")
+
+        return False
+
+    def _should_switch_to_idle_mode(self, target_mode: HVACMode) -> bool:
+        """Determine if we should switch to idle mode when algorithm is inactive."""
+        current_mode = self.state_manager.current_hvac_mode
+
+        # Switch to idle if target is idle mode and current is not idle
+        if target_mode in [HVACMode.DRY, HVACMode.FAN]:
+            if current_mode not in ["dry", "fan"]:
+                self.log(
+                    f"Should switch to idle: target={target_mode.value}, current={current_mode}"
+                )
+                return True
+            else:
+                self.log(
+                    f"Already in idle mode: target={target_mode.value}, current={current_mode}"
+                )
+
+        return False
+
+    def _switch_to_idle_mode(self, target_mode: HVACMode):
+        """Switch to idle mode without activating the algorithm."""
+        self.log(f"🔵 SWITCHING TO IDLE MODE: {target_mode.value}")
+
+        # Set HVAC mode to idle
+        self.executor.set_hvac_mode(target_mode)
+
+        # Set all active zone dampers to minimum
+        active_zones = self.state_manager.get_active_zones()
+        self.log(f"Setting minimum dampers for active zones: {active_zones}")
+        self.executor.set_minimum_dampers(self.state_manager)
+
+        self.log(f"✅ Switched to idle mode {target_mode.value} successfully")
+
+    def _activate_algorithm(self, target_mode: HVACMode):
+        """Activate the smart algorithm."""
+        self.log(f"🔥 ACTIVATING ALGORITHM in {target_mode.value} mode")
+
+        # Set HVAC mode
+        self.log(f"Setting HVAC mode to {target_mode.value}")
+        self.executor.set_hvac_mode(target_mode)
+
+        # Calculate and set damper positions
+        if target_mode == HVACMode.HEAT:
+            trigger_zones = self.state_manager.get_zones_needing_heating()
+            self.log(f"Trigger zones for heating: {trigger_zones}")
+        else:  # COOL
+            trigger_zones = self.state_manager.get_zones_needing_cooling()
+            self.log(f"Trigger zones for cooling: {trigger_zones}")
+
+        damper_positions = self.decision_engine.calculate_damper_positions(
+            self.state_manager, trigger_zones, target_mode
+        )
+        self.log(f"Calculated damper positions: {damper_positions}")
+        self.executor.set_damper_positions(damper_positions, self.state_manager)
+
+        # Update algorithm state
+        self.algorithm_active = True
+        self.current_algorithm_mode = target_mode
+        self.monitor.start_monitoring()
+        self.log(f"✅ Algorithm activated successfully")
+
+    def _deactivate_algorithm(self):
+        """Deactivate the smart algorithm and return to idle mode."""
+        self.log(f"🔵 DEACTIVATING ALGORITHM - returning to idle mode")
+
+        # Get current config
+        current_config = self.config_manager.get_config()
+
+        # Set appropriate idle mode using automatic logic
+        idle_mode = self.decision_engine.get_idle_mode(current_config.smart_hvac_mode)
+        self.log(
+            f"Setting idle mode to {idle_mode.value} (smart_hvac_mode: {current_config.smart_hvac_mode})"
+        )
+        self.executor.set_hvac_mode(idle_mode)
+
+        # Set dampers to minimum for active zones
+        active_zones = self.state_manager.get_active_zones()
+        self.log(f"Setting minimum dampers for active zones: {active_zones}")
+        self.executor.set_minimum_dampers(self.state_manager)
+
+        # Reset algorithm state
+        self.algorithm_active = False
+        self.current_algorithm_mode = None
+        self.monitor.stop_monitoring()
+        self.log(f"✅ Algorithm deactivated successfully")
+
+    def toggle_controller(self, enabled: bool):
+        """Enable or disable the smart controller."""
+        self.log(
+            "INFO: Controller enabled/disabled status should be changed via Home Assistant entity"
+        )
+        self.log(
+            f"Current status can be viewed in: {self.config_manager.config_entities.get('enabled', 'N/A')}"
+        )
+
+    def set_smart_hvac_mode(self, mode: str):
+        """Set the desired HVAC mode (heat or cool)."""
+        self.log("INFO: Smart HVAC mode should be changed via Home Assistant entity")
+        self.log(
+            f"Current mode can be changed in: {self.config_manager.config_entities.get('smart_hvac_mode', 'N/A')}"
+        )
 
     def get_status(self) -> Dict:
-        """Get current status of the controller"""
-        # Force update zone states before returning status
-        self._update_zone_states()
+        """Get current status of the controller."""
+        self.state_manager.update_all_zones()
 
-        active_zones = [name for name, zone in self.zones.items() if zone.is_active]
+        active_zones = self.state_manager.get_active_zones()
 
-        self.log(f"DEBUG: get_status called - active zones: {active_zones}")
-
-        # Get current HVAC mode using Entity API
-        current_hvac_mode = self.current_hvac_mode
-        if not current_hvac_mode:
-            try:
-                main_entity = self.get_entity(self.config.main_climate)
-                current_hvac_mode = main_entity.get_state()
-            except:
-                current_hvac_mode = "unknown"
-
-        status = {
+        return {
             "enabled": self.config.enabled,
             "algorithm_active": self.algorithm_active,
-            "current_hvac_mode": current_hvac_mode,
+            "current_hvac_mode": self.state_manager.current_hvac_mode,
             "smart_hvac_mode": self.config.smart_hvac_mode,
             "algorithm_mode": (
-                self.algorithm_mode.value if self.algorithm_mode else None
+                self.current_algorithm_mode.value
+                if self.current_algorithm_mode
+                else None
             ),
             "active_zones": active_zones,
-            "last_check": (
-                self.last_check_time.isoformat() if self.last_check_time else None
-            ),
             "zone_states": {
                 name: {
                     "current_temp": zone.current_temp,
@@ -870,9 +1005,6 @@ class SmartAirconController(hass.Hass):
                     "is_active": zone.is_active,
                     "damper_position": zone.damper_position,
                 }
-                for name, zone in self.zones.items()
+                for name, zone in self.state_manager.zones.items()
             },
         }
-
-        self.log(f"DEBUG: get_status returning: {status}")
-        return status
