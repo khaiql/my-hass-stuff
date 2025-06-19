@@ -11,7 +11,7 @@ from typing import Dict
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from smart_aircon_controller import StateManager, ZoneState, HVACMode, ControllerConfig
+from smart_aircon_controller.smart_aircon_controller import StateManager, ZoneState, HVACMode, ControllerConfig
 
 
 class TestStateManagerInitialization:
@@ -148,6 +148,7 @@ class TestTemperatureToleranceLogic:
         """Should calculate cooling threshold as target + tolerance."""
         config = ControllerConfig(**sample_config)
         config.temp_tolerance = 0.5
+        config.smart_hvac_mode = "cool"  # Set mode to cool for this test
         state_manager = StateManager(mock_hass, config, sample_zone_configs)
         
         # Set up zone state

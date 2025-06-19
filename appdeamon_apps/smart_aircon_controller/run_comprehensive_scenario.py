@@ -166,7 +166,7 @@ class FinalTestController:
         self.algorithm_mode = mode
 
 
-def test_comprehensive_scenario():
+def run_comprehensive_scenario():
     """Test comprehensive real-world scenario"""
     print("COMPREHENSIVE FINAL TEST")
     print("=" * 60)
@@ -299,7 +299,7 @@ def test_comprehensive_scenario():
 
 
 if __name__ == "__main__":
-    success = test_comprehensive_scenario()
+    success = run_comprehensive_scenario()
     
     print("\n" + "=" * 60)
     if success:

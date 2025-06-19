@@ -92,3 +92,8 @@ graph TD
 MUST READ: 
 - https://appdaemon.readthedocs.io/en/latest/_sources/AD_API_REFERENCE.rst.txt
 - https://appdaemon.readthedocs.io/en/latest/_sources/APPGUIDE.rst.txt
+
+## Pending tasks
+
+1. Need to have a time gap when changing between HVAC state, e.g. DRY -> HEAT, HEAT -> DRY, and similarly for COOL, to avoid rapid state change, by looking into the history of the entity state.
+2. When calling restore temperature of the zones from DRY -> HEAT mode, it is still not working, should implement a change_and_check on each entity when setting temperature, and retry a few times. 

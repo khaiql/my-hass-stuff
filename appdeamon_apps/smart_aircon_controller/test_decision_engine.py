@@ -4,7 +4,7 @@ Following TDD approach - comprehensive tests for decision logic.
 """
 import pytest
 from unittest.mock import Mock
-from smart_aircon_controller import DecisionEngine, StateManager, HVACMode, ControllerConfig
+from smart_aircon_controller.smart_aircon_controller import DecisionEngine, StateManager, HVACMode, ControllerConfig
 
 
 class TestDecisionEngineInitialization:

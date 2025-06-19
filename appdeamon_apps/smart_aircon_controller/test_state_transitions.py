@@ -6,7 +6,7 @@ Home Assistant restarts, and other critical state transitions.
 import pytest
 from unittest.mock import Mock, patch
 import datetime
-from smart_aircon_controller import StateManager, DecisionEngine, ConfigManager, HVACMode, ControllerConfig
+from smart_aircon_controller.smart_aircon_controller import StateManager, DecisionEngine, ConfigManager, HVACMode, ControllerConfig
 
 
 class TestConfigManagerEnableDisableTransitions:

@@ -167,6 +167,46 @@ logs:
     level: DEBUG
 ```
 
+## Development and Testing
+
+This section describes how to set up a development environment to run the test suite for the controller.
+
+### Setup
+
+1.  **Navigate to the app directory**:
+    ```bash
+    cd /path/to/your/appdaemon/apps/smart_aircon_controller
+    ```
+
+2.  **Create and activate a Python virtual environment**:
+    ```bash
+    python3 -m venv .venv
+    source .venv/bin/activate
+    ```
+
+3.  **Install dependencies**:
+    The controller requires AppDaemon and other packages for testing. Install them using `pip`.
+    ```bash
+    pip install -r requirements-test.txt
+    pip install appdaemon
+    ```
+
+### Running Tests
+
+The project includes a test suite to verify functionality.
+
+1.  **Run the standard tests**:
+    Execute the `run_tests.py` script to run all unit tests.
+    ```bash
+    python3 run_tests.py
+    ```
+
+2.  **Run tests with coverage**:
+    To generate a test coverage report, use the `--coverage` flag. This will create an `htmlcov` directory with a detailed HTML report.
+    ```bash
+    python3 run_tests.py --coverage
+    ```
+
 ## Algorithm Logic
 
 ### Heating Mode

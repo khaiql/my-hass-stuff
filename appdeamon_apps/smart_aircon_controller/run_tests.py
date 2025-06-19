@@ -2,68 +2,49 @@
 """
 Test runner for Smart Aircon Controller
 
-This script runs the simplified tests that work with mocked AppDaemon dependencies.
+This script runs tests using pytest.
 """
 
 import sys
 import os
 import subprocess
 
-def run_simple_tests():
-    """Run the simplified tests"""
-    print("Running Smart Aircon Controller Tests (Simple)...")
+def run_pytest(coverage=False):
+    """Helper to run pytest with or without coverage."""
+    print(f"Running Smart Aircon Controller Tests with pytest {'(Coverage)' if coverage else ''}...")
     print("=" * 60)
     
+    # Get the directory of this script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # Go one level up to the 'apps' directory to fix import paths
+    project_root = os.path.dirname(script_dir)
+
     try:
-        result = subprocess.run([sys.executable, "-m", "unittest", "discover", "."], 
-                              capture_output=True, text=True,
-                              cwd=os.path.dirname(os.path.abspath(__file__)))
+        cmd = [sys.executable, "-m", "pytest"]
+        if coverage:
+            cmd.extend(["--cov=smart_aircon_controller", "--cov-report=term-missing", "--cov-report=html"])
+        
+        # Specify the test directory
+        cmd.append("smart_aircon_controller/")
+
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=project_root)
         
         print(result.stdout)
         if result.stderr:
             print("STDERR:", result.stderr)
-        
+            
+        if coverage and result.returncode == 0:
+            print(f"\nHTML coverage report generated in: {os.path.join(script_dir, 'htmlcov')}")
+
         return result.returncode == 0
     except Exception as e:
         print(f"Error running tests: {e}")
         return False
 
-def run_coverage_tests():
-    """Run tests with coverage"""
-    print("Running Smart Aircon Controller Tests with Coverage...")
-    print("=" * 60)
-    
-    try:
-        # Run with coverage
-        result = subprocess.run([
-            sys.executable, "-m", "coverage", "run", "--source=.", "-m", "unittest", "discover", "."
-        ], capture_output=True, text=True,
-           cwd=os.path.dirname(os.path.abspath(__file__)))
-        
-        print(result.stdout)
-        if result.stderr:
-            print("STDERR:", result.stderr)
-        
-        if result.returncode == 0:
-            # Generate coverage report
-            subprocess.run([sys.executable, "-m", "coverage", "report"],
-                           cwd=os.path.dirname(os.path.abspath(__file__)))
-            subprocess.run([sys.executable, "-m", "coverage", "html"],
-                           cwd=os.path.dirname(os.path.abspath(__file__)))
-            print("\nHTML coverage report generated in: htmlcov/")
-        
-        return result.returncode == 0
-    except Exception as e:
-        print(f"Error running coverage tests: {e}")
-        return False
-
 def main():
     """Main test runner"""
-    if len(sys.argv) > 1 and sys.argv[1] == "--coverage":
-        success = run_coverage_tests()
-    else:
-        success = run_simple_tests()
-    
+    use_coverage = len(sys.argv) > 1 and sys.argv[1] == "--coverage"
+    success = run_pytest(coverage=use_coverage)
     sys.exit(0 if success else 1)
 
 if __name__ == "__main__":
