@@ -170,6 +170,7 @@ class StateManager:
         self.zones: Dict[str, ZoneState] = {}
         self.current_hvac_mode: Optional[str] = None
         self.temperature_history: Dict[str, List[Tuple[datetime.datetime, float]]] = {}
+        self.controller_ref = None  # Will be set by controller
 
         self._initialize_zones(zones_config)
 
@@ -227,12 +228,18 @@ class StateManager:
                 target_temp = climate_entity.attributes.get("temperature", 0.0)
                 current_temp = climate_entity.attributes.get("current_temperature", 0.0)
 
-                zone.target_temp = (
-                    float(target_temp) if target_temp is not None else 0.0
-                )
+                raw_target_temp = float(target_temp) if target_temp is not None else 0.0
                 zone.current_temp = (
                     float(current_temp) if current_temp is not None else 0.0
                 )
+                
+                # Use effective target temp (stored sensor value if in idle mode)
+                if self.controller_ref:
+                    zone.target_temp = self.controller_ref._get_effective_target_temp(
+                        zone_name, raw_target_temp
+                    )
+                else:
+                    zone.target_temp = raw_target_temp
 
             # Update damper position
             damper_entity = self.hass.get_entity(zone.damper_entity)
@@ -667,6 +674,7 @@ class SmartAirconController(hass.Hass):
         # Initialize components
         config = self.config_manager.get_config()
         self.state_manager = StateManager(self, config, self.args.get("zones", {}))
+        self.state_manager.controller_ref = self  # Set reference for effective target temp
         self.decision_engine = DecisionEngine(config)
         self.executor = Executor(self, config)
         self.monitor = Monitor(config)
@@ -674,6 +682,7 @@ class SmartAirconController(hass.Hass):
         # Algorithm state
         self.algorithm_active = False
         self.current_algorithm_mode: Optional[HVACMode] = None
+        self._pending_activation_mode: Optional[HVACMode] = None
 
         # Set up periodic checking
         self.run_every(
@@ -902,6 +911,9 @@ class SmartAirconController(hass.Hass):
         """Switch to idle mode without activating the algorithm."""
         self.log(f"🔵 SWITCHING TO IDLE MODE: {target_mode.value}")
 
+        # Save current target temperatures to sensor entities before mode change
+        self._save_zone_targets_to_sensors()
+
         # Set HVAC mode to idle
         self.executor.set_hvac_mode(target_mode)
 
@@ -916,9 +928,40 @@ class SmartAirconController(hass.Hass):
         """Activate the smart algorithm."""
         self.log(f"🔥 ACTIVATING ALGORITHM in {target_mode.value} mode")
 
-        # Set HVAC mode
-        self.log(f"Setting HVAC mode to {target_mode.value}")
+        # Store target mode for delayed execution
+        self._pending_activation_mode = target_mode
+
+        # Step 1: Set HVAC mode first (from idle to active mode)
+        self.log(f"Step 1: Setting HVAC mode to {target_mode.value}")
         self.executor.set_hvac_mode(target_mode)
+
+        # Step 2: Wait for mode change, then restore temperatures
+        self.log("Step 2: Waiting for HVAC mode change, then will restore temperatures...")
+        self.run_in(self._restore_temperatures_after_mode_change, 3)  # 3 second delay
+
+    def _restore_temperatures_after_mode_change(self, kwargs):
+        """Restore temperatures after HVAC mode change."""
+        target_mode = self._pending_activation_mode
+        self.log(f"Step 2: Restoring target temperatures for {target_mode.value} mode")
+
+        # Restore target temperatures from sensors after mode change
+        self._restore_zone_targets_from_sensors()
+
+        # Step 3: Wait for temperature restoration, then set dampers
+        self.log("Step 3: Waiting for temperature restoration, then will set dampers...")
+        self.run_in(self._complete_algorithm_activation, 3)  # Another 3 second delay
+
+    def _complete_algorithm_activation(self, kwargs):
+        """Complete algorithm activation after temperature restoration delay."""
+        target_mode = self._pending_activation_mode
+        self.log(f"Step 3: Completing algorithm activation for {target_mode.value} mode")
+
+        # Verify temperature restoration
+        self._verify_temperature_restoration()
+
+        # Update zone states with restored temperatures before calculating dampers
+        self.log("Updating zone states after temperature restoration")
+        self.state_manager.update_all_zones()
 
         # Calculate and set damper positions
         if target_mode == HVACMode.HEAT:
@@ -944,6 +987,9 @@ class SmartAirconController(hass.Hass):
         """Deactivate the smart algorithm and return to idle mode."""
         self.log(f"🔵 DEACTIVATING ALGORITHM - returning to idle mode")
 
+        # Save current target temperatures to sensor entities before mode change
+        self._save_zone_targets_to_sensors()
+
         # Get current config
         current_config = self.config_manager.get_config()
 
@@ -964,6 +1010,89 @@ class SmartAirconController(hass.Hass):
         self.current_algorithm_mode = None
         self.monitor.stop_monitoring()
         self.log(f"✅ Algorithm deactivated successfully")
+
+    def _save_zone_targets_to_sensors(self):
+        """Save current zone target temperatures to sensor entities."""
+        for zone_name, zone in self.state_manager.zones.items():
+            if zone.is_active:
+                sensor_entity = f"sensor.smart_aircon_{zone_name}_target_temp"
+                try:
+                    self.set_state(
+                        sensor_entity,
+                        state=zone.target_temp,
+                        attributes={
+                            "unit_of_measurement": "°C",
+                            "friendly_name": f"Smart Aircon {zone_name.title()} Target Temperature",
+                            "device_class": "temperature",
+                            "source": "smart_aircon_controller",
+                            "zone": zone_name,
+                        }
+                    )
+                    self.log(f"Saved {zone_name} target temp to sensor: {zone.target_temp}°C")
+                except Exception as e:
+                    self.log(f"Error saving target temp for {zone_name}: {e}")
+
+    def _restore_zone_targets_from_sensors(self):
+        """Restore zone target temperatures from sensor entities to climate entities."""
+        for zone_name, zone in self.state_manager.zones.items():
+            if zone.is_active:
+                sensor_entity = f"sensor.smart_aircon_{zone_name}_target_temp"
+                try:
+                    sensor_state = self.get_state(sensor_entity)
+                    if sensor_state not in ["unavailable", "unknown", None]:
+                        stored_target = float(sensor_state)
+                        
+                        # Set the target temperature back to the climate entity
+                        self.call_service(
+                            "climate/set_temperature",
+                            entity_id=zone.entity_id,
+                            temperature=stored_target,
+                        )
+                        self.log(f"Restored {zone_name} target temperature to {stored_target}°C")
+                    else:
+                        self.log(f"No stored target temperature found for {zone_name}")
+                except Exception as e:
+                    self.log(f"Error restoring target temperature for {zone_name}: {e}")
+
+    def _verify_temperature_restoration(self):
+        """Verify that zone target temperatures have been properly restored."""
+        for zone_name, zone in self.state_manager.zones.items():
+            if zone.is_active:
+                sensor_entity = f"sensor.smart_aircon_{zone_name}_target_temp"
+                try:
+                    # Get expected target from sensor
+                    sensor_state = self.get_state(sensor_entity)
+                    if sensor_state not in ["unavailable", "unknown", None]:
+                        expected_target = float(sensor_state)
+                        
+                        # Get actual target from climate entity
+                        climate_entity = self.get_entity(zone.entity_id)
+                        actual_target = climate_entity.attributes.get("temperature", 0.0)
+                        actual_target = float(actual_target) if actual_target is not None else 0.0
+                        
+                        if abs(actual_target - expected_target) < 0.1:  # Within 0.1°C tolerance
+                            self.log(f"✅ {zone_name} target temperature verified: {actual_target}°C")
+                        else:
+                            self.log(f"⚠️ {zone_name} target mismatch: expected {expected_target}°C, got {actual_target}°C")
+                except Exception as e:
+                    self.log(f"Error verifying target temperature for {zone_name}: {e}")
+
+    def _get_effective_target_temp(self, zone_name: str, current_target: float) -> float:
+        """Get effective target temperature - use stored sensor value if in idle mode."""
+        # If in idle mode (DRY/FAN), try to use stored target temp
+        if self.state_manager.current_hvac_mode in ["dry", "fan"]:
+            sensor_entity = f"sensor.smart_aircon_{zone_name}_target_temp"
+            try:
+                sensor_state = self.get_state(sensor_entity)
+                if sensor_state not in ["unavailable", "unknown", None]:
+                    stored_target = float(sensor_state)
+                    self.log(f"Using stored target for {zone_name}: {stored_target}°C (current: {current_target}°C)")
+                    return stored_target
+            except Exception as e:
+                self.log(f"Error reading stored target for {zone_name}: {e}")
+        
+        # Use current target temperature
+        return current_target
 
     def toggle_controller(self, enabled: bool):
         """Enable or disable the smart controller."""
