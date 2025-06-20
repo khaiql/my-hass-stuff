@@ -1,0 +1,155 @@
+# Home Assistant Configuration for Smart Aircon Controller
+# Add these sections to your configuration.yaml or use the UI to create helpers
+
+# Input helpers for dynamic configuration
+input_boolean:
+  smart_aircon_enabled:
+    name: "Smart Aircon Controller Enabled"
+    icon: mdi:air-conditioner
+
+input_select:
+  smart_aircon_hvac_mode:
+    name: "Smart Aircon HVAC Mode"
+    options:
+      - heat
+      - cool
+    initial: heat
+    icon: mdi:thermostat
+
+input_number:
+  smart_aircon_temp_tolerance:
+    name: "Temperature Tolerance"
+    min: 0.1
+    max: 5.0
+    step: 0.1
+    initial: 0.5
+    unit_of_measurement: "°C"
+    icon: mdi:thermometer-lines
+
+  smart_aircon_primary_damper:
+    name: "Primary Damper Percentage"
+    min: 30
+    max: 100
+    step: 5
+    initial: 50
+    unit_of_measurement: "%"
+    icon: mdi:valve
+
+  smart_aircon_secondary_damper:
+    name: "Secondary Damper Percentage"
+    min: 20
+    max: 80
+    step: 5
+    initial: 40
+    unit_of_measurement: "%"
+    icon: mdi:valve
+
+  smart_aircon_overflow_damper:
+    name: "Overflow Damper Percentage"
+    min: 5
+    max: 50
+    step: 5
+    initial: 10
+    unit_of_measurement: "%"
+    icon: mdi:valve
+
+  smart_aircon_minimum_damper:
+    name: "Minimum Damper Percentage"
+    min: 1
+    max: 20
+    step: 1
+    initial: 5
+    unit_of_measurement: "%"
+    icon: mdi:valve
+
+# Template sensors for monitoring (optional)
+template:
+  - sensor:
+      - name: "Smart Aircon Controller Status"
+        state: >
+          {% if is_state('input_boolean.smart_aircon_enabled', 'on') %}
+            Enabled
+          {% else %}
+            Disabled
+          {% endif %}
+        icon: >
+          {% if is_state('input_boolean.smart_aircon_enabled', 'on') %}
+            mdi:air-conditioner
+          {% else %}
+            mdi:air-conditioner-off
+          {% endif %}
+
+# Dashboard card configuration (optional)
+# Add this to your dashboard YAML or use the UI
+lovelace:
+  dashboards:
+    smart-aircon:
+      mode: yaml
+      title: Smart Aircon Controller
+      cards:
+        - type: entities
+          title: Smart Aircon Controller
+          entities:
+            - entity: sensor.smart_aircon_controller_status
+              name: Status
+            - entity: input_boolean.smart_aircon_enabled
+              name: Controller Enabled
+            - entity: input_select.smart_aircon_hvac_mode
+              name: HVAC Mode
+            - type: divider
+            - entity: input_number.smart_aircon_temp_tolerance
+              name: Temperature Tolerance
+            - entity: input_number.smart_aircon_primary_damper
+              name: Primary Damper %
+            - entity: input_number.smart_aircon_secondary_damper
+              name: Secondary Damper %
+            - entity: input_number.smart_aircon_overflow_damper
+              name: Overflow Damper %
+            - entity: input_number.smart_aircon_minimum_damper
+              name: Minimum Damper %
+
+# AppDaemon apps.yaml configuration
+# smart_aircon_controller:
+#   module: smart_aircon_controller
+#   class: SmartAirconController
+#   
+#   # Static configuration (requires restart to change)
+#   dry_run: true  # Enable for safe testing, false for live operation
+#   check_interval: 30
+#   main_climate: "climate.aircon"
+#   algorithm_timeout_minutes: 30
+#   stability_check_minutes: 10
+#   progress_timeout_minutes: 15
+#   
+#   # Zone configuration
+#   zones:
+#     lounge:
+#       climate_entity: "climate.lounge"
+#       damper_entity: "cover.lounge_damper"
+#     bedroom:
+#       climate_entity: "climate.bedroom" 
+#       damper_entity: "cover.bedroom_damper"
+#     study:
+#       climate_entity: "climate.study"
+#       damper_entity: "cover.study_damper"
+#       isolation: true  # Optional: isolated zone
+#   
+#   # Dynamic configuration entities (no dry_run here)
+#   config_entities:
+#     enabled: "input_boolean.smart_aircon_enabled"
+#     smart_hvac_mode: "input_select.smart_aircon_hvac_mode"
+#     temp_tolerance: "input_number.smart_aircon_temp_tolerance"
+#     primary_damper_percent: "input_number.smart_aircon_primary_damper"
+#     secondary_damper_percent: "input_number.smart_aircon_secondary_damper"
+#     overflow_damper_percent: "input_number.smart_aircon_overflow_damper"
+#     minimum_damper_percent: "input_number.smart_aircon_minimum_damper"
+#   
+#   # Fallback values if entities are unavailable (no dry_run here)
+#   config_defaults:
+#     enabled: false
+#     smart_hvac_mode: "heat"
+#     temp_tolerance: 0.5
+#     primary_damper_percent: 50
+#     secondary_damper_percent: 40
+#     overflow_damper_percent: 10
+#     minimum_damper_percent: 5 

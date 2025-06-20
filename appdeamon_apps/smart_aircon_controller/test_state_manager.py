@@ -190,6 +190,20 @@ class TestStateManagerZoneQueries:
         assert "master_bed" in active_zones
         assert "baby_bed" not in active_zones
 
+    def test_get_active_zones_returns_empty_when_no_active_zones(self, mock_hass, sample_config, sample_zone_configs):
+        """Should return empty list when no zones are active."""
+        config = ControllerConfig(**sample_config)
+        state_manager = StateManager(mock_hass, config, sample_zone_configs)
+        
+        # Set all zones inactive
+        for zone in state_manager.zones.values():
+            zone.is_active = False
+        
+        active_zones = state_manager.get_active_zones()
+        
+        assert active_zones == []
+        assert len(active_zones) == 0
+
     def test_get_zones_needing_heating_wrong_mode(self, mock_hass, sample_config, sample_zone_configs):
         """Should return empty list when not in heating mode."""
         config = ControllerConfig(**sample_config)
@@ -339,27 +353,33 @@ class TestStateManagerHVACModeHistory:
         config = ControllerConfig(**sample_config)
         state_manager = StateManager(mock_hass, config, sample_zone_configs)
         
-        # Mock history data
+        # Mock history data - last_changed should be datetime objects as per debug findings
         now = datetime.datetime.now()
-        last_change_time = now - datetime.timedelta(minutes=10)
+        old_change_time = now - datetime.timedelta(minutes=20)
+        recent_change_time = now - datetime.timedelta(minutes=10)
+        current_time = now - datetime.timedelta(minutes=5)
         
+        # Create history with actual mode changes: dry -> heat -> heat (current)
         mock_history = [[
             {
                 'state': 'dry',
-                'last_changed': '2023-01-01T10:00:00Z'
+                'last_changed': old_change_time  # datetime object, not string
             },
             {
-                'state': 'heat',
-                'last_changed': last_change_time.isoformat() + 'Z'
+                'state': 'heat',  # Mode change from dry to heat
+                'last_changed': recent_change_time  # This is when heat mode started
+            },
+            {
+                'state': 'heat',  # Still heat mode, just a temperature update
+                'last_changed': current_time
             }
         ]]
         
         mock_hass.get_history.return_value = mock_history
-        mock_hass.convert_utc.return_value = last_change_time
         
-        # Should return the most recent change time
+        # Should return the time when heat mode started (when it changed from dry to heat)
         result = state_manager.get_time_since_last_hvac_mode_change()
-        assert result == last_change_time
+        assert result == recent_change_time
     
     def test_get_time_since_last_hvac_mode_change_returns_none_with_no_history(self, mock_hass, sample_config, sample_zone_configs):
         """Should return None when no HVAC mode history is available."""
@@ -374,21 +394,83 @@ class TestStateManagerHVACModeHistory:
 
     def test_get_time_since_last_hvac_mode_change_returns_none_with_single_entry(self, mock_hass, sample_config, sample_zone_configs):
         """Should return None when only one history entry exists (no state changes)."""
+        import datetime
+        
         config = ControllerConfig(**sample_config)
         state_manager = StateManager(mock_hass, config, sample_zone_configs)
         
         # Mock history with only one entry (current state, no changes)
+        now = datetime.datetime.now()
         mock_history = [[
             {
                 'state': 'heat',
-                'last_changed': '2023-01-01T10:00:00Z'
+                'last_changed': now - datetime.timedelta(minutes=5)  # datetime object, not string
             }
         ]]
         
         mock_hass.get_history.return_value = mock_history
         
-        # Should return None when no state changes
+        # Should return None when no state changes (only one entry)
         assert state_manager.get_time_since_last_hvac_mode_change() is None
+
+    def test_get_time_since_last_hvac_mode_change_returns_oldest_when_no_mode_changes(self, mock_hass, sample_config, sample_zone_configs):
+        """Should return oldest entry timestamp when multiple entries exist but no mode changes."""
+        import datetime
+        
+        config = ControllerConfig(**sample_config)
+        state_manager = StateManager(mock_hass, config, sample_zone_configs)
+        
+        # Mock history with multiple entries but same state (no mode changes)
+        now = datetime.datetime.now()
+        oldest_time = now - datetime.timedelta(minutes=20)
+        middle_time = now - datetime.timedelta(minutes=10)
+        newest_time = now - datetime.timedelta(minutes=5)
+        
+        mock_history = [[
+            {
+                'state': 'heat',
+                'last_changed': oldest_time
+            },
+            {
+                'state': 'heat',  # Same state
+                'last_changed': middle_time
+            },
+            {
+                'state': 'heat',  # Same state
+                'last_changed': newest_time
+            }
+        ]]
+        
+        mock_hass.get_history.return_value = mock_history
+        
+        # Should return the oldest entry when no mode changes found
+        assert state_manager.get_time_since_last_hvac_mode_change() == oldest_time
+
+    def test_get_time_since_last_hvac_mode_change_uses_start_time_parameter(self, mock_hass, sample_config, sample_zone_configs):
+        """Should call get_history with start_time parameter for last 2 hours."""
+        import datetime
+        from unittest.mock import patch
+        
+        config = ControllerConfig(**sample_config)
+        state_manager = StateManager(mock_hass, config, sample_zone_configs)
+        
+        # Mock empty history to avoid processing
+        mock_hass.get_history.return_value = []
+        
+        # Call the method
+        with patch('datetime.datetime') as mock_datetime:
+            mock_now = datetime.datetime(2025, 6, 20, 10, 0, 0)
+            mock_datetime.now.return_value = mock_now
+            mock_datetime.timedelta = datetime.timedelta  # Keep real timedelta
+            
+            state_manager.get_time_since_last_hvac_mode_change()
+            
+            # Verify get_history was called with start_time (2 hours ago)
+            expected_start_time = mock_now - datetime.timedelta(hours=2)
+            mock_hass.get_history.assert_called_once_with(
+                entity_id=config.main_climate,
+                start_time=expected_start_time
+            )
 
     def test_get_time_since_last_hvac_mode_change_handles_errors(self, mock_hass, sample_config, sample_zone_configs):
         """Should handle errors gracefully when getting HVAC mode history."""
@@ -400,6 +482,47 @@ class TestStateManagerHVACModeHistory:
         
         # Should return None when error occurs
         assert state_manager.get_time_since_last_hvac_mode_change() is None
+
+    def test_get_time_since_last_hvac_mode_change_handles_timezone_aware_datetimes(self, mock_hass, sample_config, sample_zone_configs):
+        """Should handle timezone-aware datetimes from history API correctly."""
+        import datetime
+        from datetime import timezone
+        
+        config = ControllerConfig(**sample_config)
+        state_manager = StateManager(mock_hass, config, sample_zone_configs)
+        
+        # Create timezone-aware datetimes (like what comes from HA history API)
+        now = datetime.datetime.now()
+        utc_tz = timezone.utc
+        old_change_time_utc = now.replace(tzinfo=utc_tz) - datetime.timedelta(minutes=20)
+        recent_change_time_utc = now.replace(tzinfo=utc_tz) - datetime.timedelta(minutes=10)
+        
+        # Create history with timezone-aware datetimes
+        mock_history = [[
+            {
+                'state': 'dry',
+                'last_changed': old_change_time_utc  # timezone-aware datetime
+            },
+            {
+                'state': 'heat',  # Mode change from dry to heat
+                'last_changed': recent_change_time_utc  # timezone-aware datetime
+            }
+        ]]
+        
+        mock_hass.get_history.return_value = mock_history
+        
+        # Should return a naive datetime (timezone stripped)
+        result = state_manager.get_time_since_last_hvac_mode_change()
+        
+        # Result should be a naive datetime (no timezone info)
+        assert result is not None
+        assert isinstance(result, datetime.datetime)
+        assert result.tzinfo is None  # Should be naive
+        
+        # Should be able to compare with datetime.now() without timezone errors
+        now_naive = datetime.datetime.now()
+        time_diff = now_naive - result  # This should not raise timezone error
+        assert isinstance(time_diff, datetime.timedelta)
 
 
 @pytest.mark.edge_case

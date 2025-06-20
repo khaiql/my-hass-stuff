@@ -12,7 +12,7 @@ class TestExecutor:
     def test_initialization(self, mock_hass, sample_config):
         """Executor should initialize with HASS API and configuration."""
         config = ControllerConfig(**sample_config)
-        executor = Executor(mock_hass, config)
+        executor = Executor(mock_hass, config, config)
         
         assert executor.hass == mock_hass
         assert executor.config == config
@@ -20,7 +20,7 @@ class TestExecutor:
     def test_set_hvac_mode_success(self, mock_hass, sample_config):
         """Should set HVAC mode via climate service call."""
         config = ControllerConfig(**sample_config)
-        executor = Executor(mock_hass, config)
+        executor = Executor(mock_hass, config, config)
         
         executor.set_hvac_mode(HVACMode.HEAT)
         
@@ -33,7 +33,7 @@ class TestExecutor:
     def test_set_hvac_mode_exception_handling(self, mock_hass, sample_config):
         """Should handle exceptions when setting HVAC mode."""
         config = ControllerConfig(**sample_config)
-        executor = Executor(mock_hass, config)
+        executor = Executor(mock_hass, config, config)
         
         mock_hass.call_service.side_effect = Exception("Service call failed")
         
@@ -43,7 +43,7 @@ class TestExecutor:
     def test_set_damper_positions_success(self, mock_hass, sample_config, sample_zone_configs):
         """Should set damper positions for specified zones."""
         config = ControllerConfig(**sample_config)
-        executor = Executor(mock_hass, config)
+        executor = Executor(mock_hass, config, config)
         state_manager = StateManager(mock_hass, config, sample_zone_configs)
         
         positions = {
@@ -63,7 +63,7 @@ class TestExecutor:
     def test_set_damper_positions_exception_handling(self, mock_hass, sample_config, sample_zone_configs):
         """Should handle exceptions when setting damper positions."""
         config = ControllerConfig(**sample_config)
-        executor = Executor(mock_hass, config)
+        executor = Executor(mock_hass, config, config)
         state_manager = StateManager(mock_hass, config, sample_zone_configs)
         
         mock_hass.call_service.side_effect = Exception("Service call failed")
@@ -78,7 +78,7 @@ class TestExecutor:
     def test_set_minimum_dampers(self, mock_hass, sample_config, sample_zone_configs):
         """Should set minimum damper positions for active zones."""
         config = ControllerConfig(**sample_config)
-        executor = Executor(mock_hass, config)
+        executor = Executor(mock_hass, config, config)
         state_manager = StateManager(mock_hass, config, sample_zone_configs)
         
         # Mock some active zones

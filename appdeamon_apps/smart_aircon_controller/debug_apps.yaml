@@ -1,0 +1,9 @@
+# Debug History Apps Configuration
+# Add this to your apps.yaml file temporarily to run the debug script
+
+debug_history:
+  module: debug_history
+  class: DebugHistory
+  
+  # Configuration
+  test_entity: "climate.aircon"  # Change this to match your climate entity 

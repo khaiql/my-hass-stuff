@@ -38,6 +38,7 @@ class ControllerConfig:
     algorithm_timeout_minutes: int = 30
     stability_check_minutes: int = 10
     progress_timeout_minutes: int = 15
+    dry_run: bool = False  # When True, log actions instead of executing them
 
     # Dynamic configuration (runtime changeable via HA entities)
     enabled: bool = True
@@ -83,7 +84,7 @@ class ConfigManager:
                     )
                 else:
                     # Convert state to appropriate type
-                    if config_key == "enabled":
+                    if config_key in ["enabled"]:
                         value = state.lower() in ["on", "true", "1"]
                     elif config_key == "smart_hvac_mode":
                         value = str(state).lower()
@@ -375,29 +376,62 @@ class StateManager:
     def get_time_since_last_hvac_mode_change(self) -> Optional[datetime.datetime]:
         """Get the time of the last HVAC mode change from Home Assistant history."""
         try:
-            # Get history for the main climate entity for the last 24 hours
+            # Get history for the main climate entity for the last 2 hours
+            start_time = datetime.datetime.now() - datetime.timedelta(hours=2)
             history = self.hass.get_history(
                 entity_id=self.config.main_climate,
-                days=1
+                start_time=start_time
             )
             
             if not history or not history[0]:
                 return None
             
-            # Find the most recent state change
+            # Get the entity history list
             entity_history = history[0]
             if len(entity_history) < 2:
-                # No state changes in the last 24 hours
+                # No history or not enough entries to determine a change
                 return None
             
-            # Get the most recent state change (excluding the current state)
-            # The last entry is the current state, so we want the second to last
-            if len(entity_history) >= 2:
-                last_change = entity_history[-2]
-                last_changed_str = last_change.get('last_changed')
-                if last_changed_str:
-                    # Convert ISO 8601 string to datetime object
-                    return self.hass.convert_utc(last_changed_str)
+            # Find the most recent HVAC mode change by looking for state changes
+            # History is ordered chronologically, so we iterate from newest to oldest
+            current_state = None
+            
+            for i, entry in enumerate(reversed(entity_history)):
+                entry_state = entry.get('state')
+                
+                if current_state is None:
+                    # First entry (most recent)
+                    current_state = entry_state
+                    continue
+                
+                # Check if this entry has a different state (mode change)
+                if entry_state != current_state:
+                    # Found a mode change! The entry at index i-1 (in reversed order)
+                    # is when the current mode started
+                    change_entry = list(reversed(entity_history))[i-1]
+                    last_changed = change_entry.get('last_changed')
+                    
+                    # last_changed is already a datetime object, but may be timezone-aware
+                    # Convert to naive datetime for consistent comparison with datetime.now()
+                    if isinstance(last_changed, datetime.datetime):
+                        if last_changed.tzinfo is not None:
+                            # Convert timezone-aware datetime to naive (local time)
+                            last_changed = last_changed.replace(tzinfo=None)
+                        return last_changed
+                    else:
+                        self.hass.log(f"Unexpected last_changed type: {type(last_changed)}")
+                        return None
+            
+            # If we get here, no mode changes were found in the history
+            # Return the timestamp of the oldest entry we have
+            if len(entity_history) > 0:
+                oldest_entry = entity_history[0]
+                last_changed = oldest_entry.get('last_changed')
+                if isinstance(last_changed, datetime.datetime):
+                    if last_changed.tzinfo is not None:
+                        # Convert timezone-aware datetime to naive (local time)
+                        last_changed = last_changed.replace(tzinfo=None)
+                    return last_changed
             
             return None
             
@@ -550,16 +584,21 @@ class DecisionEngine:
 class Executor:
     """Executes decisions via Home Assistant API calls."""
 
-    def __init__(self, hass_api, config: ControllerConfig):
+    def __init__(self, hass_api, config: ControllerConfig, static_config: ControllerConfig):
         self.hass = hass_api
         self.config = config
+        self.static_config = static_config
 
     def set_hvac_mode(self, mode: HVACMode):
         """Set the main HVAC system mode."""
+        if self.static_config.dry_run:
+            self.hass.log(f"🔥 DRY RUN: Would set HVAC mode to {mode.value}")
+            return
+            
         try:
             self.hass.call_service(
                 "climate/set_hvac_mode",
-                entity_id=self.config.main_climate,
+                entity_id=self.static_config.main_climate,
                 hvac_mode=mode.value,
             )
             self.hass.log(f"Set HVAC mode to {mode.value}")
@@ -570,6 +609,14 @@ class Executor:
         self, positions: Dict[str, int], state_manager: StateManager
     ):
         """Set damper positions for all zones."""
+        if self.static_config.dry_run:
+            self.hass.log("🔥 DRY RUN: Would set damper positions:")
+            for zone_name, position in positions.items():
+                zone = state_manager.get_zone_state(zone_name)
+                if zone:
+                    self.hass.log(f"  - {zone_name}: {position}% (entity: {zone.damper_entity})")
+            return
+            
         for zone_name, position in positions.items():
             zone = state_manager.get_zone_state(zone_name)
             if not zone:
@@ -591,6 +638,12 @@ class Executor:
         for zone_name, zone in state_manager.get_all_zone_states().items():
             if zone.is_active:
                 positions[zone_name] = self.config.minimum_damper_percent
+
+        if self.static_config.dry_run:
+            self.hass.log("🔥 DRY RUN: Would set minimum dampers:")
+            for zone_name, position in positions.items():
+                self.hass.log(f"  - {zone_name}: {position}%")
+            return
 
         self.set_damper_positions(positions, state_manager)
 
@@ -720,7 +773,7 @@ class SmartAirconController(hass.Hass):
         self.state_manager = StateManager(self, config, self.args.get("zones", {}))
         self.state_manager.controller_ref = self  # Set reference for effective target temp
         self.decision_engine = DecisionEngine(config)
-        self.executor = Executor(self, config)
+        self.executor = Executor(self, config, self.static_config)
         self.monitor = Monitor(config)
 
         # Algorithm state
@@ -749,6 +802,7 @@ class SmartAirconController(hass.Hass):
             algorithm_timeout_minutes=self.args.get("algorithm_timeout_minutes", 30),
             stability_check_minutes=self.args.get("stability_check_minutes", 10),
             progress_timeout_minutes=self.args.get("progress_timeout_minutes", 15),
+            dry_run=self.args.get("dry_run", False),
         )
 
     def _validate_entities(self, kwargs):
@@ -791,7 +845,10 @@ class SmartAirconController(hass.Hass):
     def _periodic_check(self, kwargs):
         """Periodic check function called every check_interval seconds."""
         try:
-            self.log("=== PERIODIC CHECK START ===")
+            if self.static_config.dry_run:
+                self.log("🔥 === DRY RUN MODE: PERIODIC CHECK START ===")
+            else:
+                self.log("=== PERIODIC CHECK START ===")
 
             # Update dynamic configuration
             if self.config_manager.should_update():
@@ -808,7 +865,7 @@ class SmartAirconController(hass.Hass):
             current_config = self.config_manager.get_config()
 
             self.log(
-                f"Controller enabled: {current_config.enabled}, Smart HVAC mode: {current_config.smart_hvac_mode}"
+                f"Controller enabled: {current_config.enabled}, Smart HVAC mode: {current_config.smart_hvac_mode}, Dry run: {self.static_config.dry_run}"
             )
 
             # Check if controller is enabled
@@ -830,6 +887,20 @@ class SmartAirconController(hass.Hass):
             active_zones = self.state_manager.get_active_zones()
             self.log(f"Current HVAC mode: {self.state_manager.current_hvac_mode}")
             self.log(f"Active zones: {active_zones}")
+
+            # Early exit if no active zones - do nothing and leave HVAC state unchanged
+            if not active_zones:
+                self.log("ℹ️  No active zones detected - automation will do nothing (zones not managed)")
+                
+                # Deactivate algorithm if running, but don't change HVAC state
+                if self.algorithm_active:
+                    self.log("Deactivating algorithm due to no active zones, leaving HVAC state unchanged")
+                    self.algorithm_active = False
+                    self.current_algorithm_mode = None
+                    self.monitor.stop_monitoring()
+                
+                self.log("=== AUTOMATION IDLE: NO ZONES TO MANAGE ===")
+                return
 
             # Log zone details
             for zone_name, zone in self.state_manager.zones.items():
@@ -1090,6 +1161,9 @@ class SmartAirconController(hass.Hass):
 
     def _restore_zone_targets_from_sensors(self):
         """Restore zone target temperatures from sensor entities to climate entities."""
+        if self.static_config.dry_run:
+            self.log("🔥 DRY RUN: Would restore zone target temperatures:")
+            
         for zone_name, zone in self.state_manager.zones.items():
             if zone.is_active:
                 sensor_entity = f"sensor.smart_aircon_{zone_name}_target_temp"
@@ -1097,6 +1171,10 @@ class SmartAirconController(hass.Hass):
                     sensor_state = self.get_state(sensor_entity)
                     if sensor_state not in ["unavailable", "unknown", None]:
                         stored_target = float(sensor_state)
+                        
+                        if self.static_config.dry_run:
+                            self.log(f"  - {zone_name}: Would set to {stored_target}°C (entity: {zone.entity_id})")
+                            continue
                         
                         # Set the target temperature back to the climate entity
                         self.call_service(
@@ -1106,7 +1184,10 @@ class SmartAirconController(hass.Hass):
                         )
                         self.log(f"Restored {zone_name} target temperature to {stored_target}°C")
                     else:
-                        self.log(f"No stored target temperature found for {zone_name}")
+                        if self.static_config.dry_run:
+                            self.log(f"  - {zone_name}: No stored target temperature found")
+                        else:
+                            self.log(f"No stored target temperature found for {zone_name}")
                 except Exception as e:
                     self.log(f"Error restoring target temperature for {zone_name}: {e}")
 
