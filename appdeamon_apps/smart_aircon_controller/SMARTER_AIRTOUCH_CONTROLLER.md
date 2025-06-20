@@ -95,5 +95,10 @@ MUST READ:
 
 ## Pending tasks
 
-1. Need to have a time gap when changing between HVAC state, e.g. DRY -> HEAT, HEAT -> DRY, and similarly for COOL, to avoid rapid state change, by looking into the history of the entity state.
-2. When calling restore temperature of the zones from DRY -> HEAT mode, it is still not working, should implement a change_and_check on each entity when setting temperature, and retry a few times. 
+1. [Done] Need to have a time gap when changing between HVAC state, e.g. DRY -> HEAT, HEAT -> DRY, and similarly for COOL, to avoid rapid state change, by looking into the history of the entity state.
+2. [Done] When calling restore temperature of the zones from DRY -> HEAT mode, implement robust temperature setting with retry logic:
+  - Implemented a method to set temperature for a single entity with retry capability
+  - Uses AppDaemon's scheduler (`run_in()`) instead of `time.sleep()` for thread hygiene
+  - Waits for temperature changes to take effect and verifies they were set correctly
+  - Retries up to 3 times if the desired temperature is not achieved
+  - Includes comprehensive test coverage and integration with temperature restoration process

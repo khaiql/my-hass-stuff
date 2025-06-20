@@ -647,6 +647,136 @@ class Executor:
 
         self.set_damper_positions(positions, state_manager)
 
+    def set_zone_temperature_with_retry(self, entity_id: str, target_temp: float, callback=None, max_retries: int = 3, wait_seconds: float = 2.0, tolerance: float = 0.1):
+        """
+        Set zone temperature with retry logic using AppDaemon scheduler.
+        
+        Args:
+            entity_id: Climate entity ID to set temperature for
+            target_temp: Target temperature to set
+            callback: Optional callback function to call with result (success: bool)
+            max_retries: Maximum number of attempts (default: 3)
+            wait_seconds: Wait time between attempts in seconds (default: 2.0)
+            tolerance: Temperature tolerance for considering success (default: 0.1°C)
+            
+        Note: This is an async method that uses AppDaemon's scheduler.
+              If callback is provided, it will be called with success status.
+              If no callback is provided, initial attempt is made synchronously for testing.
+        """
+        if self.static_config.dry_run:
+            self.hass.log(f"🔥 DRY RUN: Would set {entity_id} temperature to {target_temp}°C")
+            if callback:
+                callback(True)
+            return True
+            
+        # Store retry context
+        retry_context = {
+            'entity_id': entity_id,
+            'target_temp': target_temp,
+            'callback': callback,
+            'max_retries': max_retries,
+            'wait_seconds': wait_seconds,
+            'tolerance': tolerance,
+            'current_attempt': 1
+        }
+        
+        # Make the first attempt
+        self._attempt_temperature_setting(retry_context)
+        
+        # For testing compatibility, if no callback provided, try immediate verification
+        if callback is None:
+            try:
+                entity = self.hass.get_entity(entity_id)
+                current_target = entity.attributes.get("temperature")
+                if current_target is not None:
+                    current_target = float(current_target)
+                    return abs(current_target - target_temp) <= tolerance
+            except:
+                pass
+            return False
+    
+    def _attempt_temperature_setting(self, retry_context):
+        """Internal method to attempt temperature setting."""
+        entity_id = retry_context['entity_id']
+        target_temp = retry_context['target_temp']
+        attempt = retry_context['current_attempt']
+        max_retries = retry_context['max_retries']
+        
+        try:
+            # Set the temperature
+            self.hass.call_service(
+                "climate/set_temperature",
+                entity_id=entity_id,
+                temperature=target_temp
+            )
+            self.hass.log(f"Attempt {attempt}: Set {entity_id} temperature to {target_temp}°C")
+            
+            # Schedule verification after wait period
+            self.hass.run_in(self._verify_temperature_setting, retry_context['wait_seconds'], retry_context=retry_context)
+            
+        except Exception as e:
+            self.hass.log(f"Error setting temperature for {entity_id} (attempt {attempt}/{max_retries}): {e}")
+            if attempt < max_retries:
+                # Schedule retry
+                retry_context['current_attempt'] += 1
+                self.hass.run_in(self._attempt_temperature_setting, retry_context['wait_seconds'], retry_context=retry_context)
+            else:
+                # Final failure
+                self.hass.log(f"❌ Failed to set {entity_id} temperature to {target_temp}°C after {max_retries} attempts")
+                if retry_context['callback']:
+                    retry_context['callback'](False)
+    
+    def _verify_temperature_setting(self, kwargs):
+        """Internal method to verify temperature setting and handle retries."""
+        retry_context = kwargs['retry_context']
+        entity_id = retry_context['entity_id']
+        target_temp = retry_context['target_temp']
+        tolerance = retry_context['tolerance']
+        attempt = retry_context['current_attempt']
+        max_retries = retry_context['max_retries']
+        
+        try:
+            entity = self.hass.get_entity(entity_id)
+            current_target = entity.attributes.get("temperature")
+            
+            if current_target is None:
+                self.hass.log(f"Warning: Cannot verify temperature for {entity_id} - no temperature attribute")
+                success = False
+            else:
+                current_target = float(current_target)
+                success = abs(current_target - target_temp) <= tolerance
+                
+                if success:
+                    self.hass.log(f"✅ Successfully set {entity_id} temperature to {current_target}°C (target: {target_temp}°C)")
+                else:
+                    self.hass.log(f"⚠️ Temperature mismatch for {entity_id}: got {current_target}°C, expected {target_temp}°C (attempt {attempt}/{max_retries})")
+            
+            if success:
+                # Success - call callback if provided
+                if retry_context['callback']:
+                    retry_context['callback'](True)
+            elif attempt < max_retries:
+                # Retry needed
+                retry_context['current_attempt'] += 1
+                self.hass.run_in(self._attempt_temperature_setting, retry_context['wait_seconds'], retry_context=retry_context)
+            else:
+                # Final failure
+                self.hass.log(f"❌ Failed to set {entity_id} temperature to {target_temp}°C after {max_retries} attempts")
+                if retry_context['callback']:
+                    retry_context['callback'](False)
+                    
+        except Exception as e:
+            self.hass.log(f"Error verifying temperature for {entity_id}: {e}")
+            if attempt < max_retries:
+                # Retry on verification error
+                retry_context['current_attempt'] += 1
+                self.hass.run_in(self._attempt_temperature_setting, retry_context['wait_seconds'], retry_context=retry_context)
+            else:
+                # Final failure
+                self.hass.log(f"❌ Failed to verify {entity_id} temperature after {max_retries} attempts")
+                if retry_context['callback']:
+                    retry_context['callback'](False)
+
 
 class Monitor:
     """Monitors system health and implements fallback logic."""
@@ -1161,9 +1291,6 @@ class SmartAirconController(hass.Hass):
 
     def _restore_zone_targets_from_sensors(self):
         """Restore zone target temperatures from sensor entities to climate entities."""
-        if self.static_config.dry_run:
-            self.log("🔥 DRY RUN: Would restore zone target temperatures:")
-            
         for zone_name, zone in self.state_manager.zones.items():
             if zone.is_active:
                 sensor_entity = f"sensor.smart_aircon_{zone_name}_target_temp"
@@ -1172,22 +1299,21 @@ class SmartAirconController(hass.Hass):
                     if sensor_state not in ["unavailable", "unknown", None]:
                         stored_target = float(sensor_state)
                         
-                        if self.static_config.dry_run:
-                            self.log(f"  - {zone_name}: Would set to {stored_target}°C (entity: {zone.entity_id})")
-                            continue
+                        # Use the robust temperature setting method with retry logic
+                        def restoration_callback(success):
+                            if success:
+                                self.log(f"✅ Successfully restored {zone_name} target temperature to {stored_target}°C")
+                            else:
+                                self.log(f"❌ Failed to restore {zone_name} target temperature to {stored_target}°C after retries")
                         
-                        # Set the target temperature back to the climate entity
-                        self.call_service(
-                            "climate/set_temperature",
-                            entity_id=zone.entity_id,
-                            temperature=stored_target,
+                        self.executor.set_zone_temperature_with_retry(
+                            zone.entity_id, 
+                            stored_target,
+                            callback=restoration_callback
                         )
-                        self.log(f"Restored {zone_name} target temperature to {stored_target}°C")
+                        self.log(f"Restoring {zone_name} target temperature to {stored_target}°C with retry logic...")
                     else:
-                        if self.static_config.dry_run:
-                            self.log(f"  - {zone_name}: No stored target temperature found")
-                        else:
-                            self.log(f"No stored target temperature found for {zone_name}")
+                        self.log(f"No stored target temperature found for {zone_name}")
                 except Exception as e:
                     self.log(f"Error restoring target temperature for {zone_name}: {e}")
 
