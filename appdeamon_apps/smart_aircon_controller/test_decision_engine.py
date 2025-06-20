@@ -484,3 +484,236 @@ class TestDecisionEngineEdgeCases:
         # Trigger zone should get primary, other isolated zone gets minimum
         assert positions["zone1"] == config.primary_damper_percent
         assert positions["zone2"] == config.minimum_damper_percent
+
+
+class TestHVACModeStabilityChecking:
+    """Test HVAC mode stability checking for preventing rapid state changes."""
+    
+    def test_should_switch_to_idle_respects_stability_check(self, mock_hass, sample_config, sample_zone_configs):
+        """Should not switch to idle if not enough time has passed since last HVAC mode change."""
+        import datetime
+        
+        config = ControllerConfig(**sample_config)
+        config.stability_check_minutes = 10
+        engine = DecisionEngine(config)
+        
+        state_manager = StateManager(mock_hass, config, sample_zone_configs)
+        state_manager.all_zones_satisfied = Mock(return_value=True)
+        state_manager.all_dampers_low = Mock(return_value=True)
+        
+        # Mock recent HVAC mode change (5 minutes ago)
+        recent_time = datetime.datetime.now() - datetime.timedelta(minutes=5)
+        state_manager.get_time_since_last_hvac_mode_change = Mock(return_value=recent_time)
+        
+        # Should not switch to idle because not enough time has passed
+        assert engine.should_switch_to_idle(state_manager, HVACMode.HEAT) is False
+    
+    def test_should_switch_to_idle_allows_after_stability_period(self, mock_hass, sample_config, sample_zone_configs):
+        """Should switch to idle if enough time has passed since last HVAC mode change."""
+        import datetime
+        
+        config = ControllerConfig(**sample_config)
+        config.stability_check_minutes = 10
+        engine = DecisionEngine(config)
+        
+        state_manager = StateManager(mock_hass, config, sample_zone_configs)
+        state_manager.all_zones_satisfied = Mock(return_value=True)
+        state_manager.all_dampers_low = Mock(return_value=True)
+        
+        # Mock old HVAC mode change (15 minutes ago)
+        old_time = datetime.datetime.now() - datetime.timedelta(minutes=15)
+        state_manager.get_time_since_last_hvac_mode_change = Mock(return_value=old_time)
+        
+        # Should switch to idle because enough time has passed
+        assert engine.should_switch_to_idle(state_manager, HVACMode.HEAT) is True
+    
+    def test_should_switch_to_idle_allows_with_no_previous_changes(self, mock_hass, sample_config, sample_zone_configs):
+        """Should switch to idle if no previous HVAC mode changes recorded."""
+        config = ControllerConfig(**sample_config)
+        config.stability_check_minutes = 10
+        engine = DecisionEngine(config)
+        
+        state_manager = StateManager(mock_hass, config, sample_zone_configs)
+        state_manager.all_zones_satisfied = Mock(return_value=True)
+        state_manager.all_dampers_low = Mock(return_value=True)
+        
+        # Mock no previous HVAC mode changes
+        state_manager.get_time_since_last_hvac_mode_change = Mock(return_value=None)
+        
+        # Should switch to idle because no previous changes
+        assert engine.should_switch_to_idle(state_manager, HVACMode.HEAT) is True
+    
+    def test_should_switch_to_idle_stability_check_with_cooling(self, mock_hass, sample_config, sample_zone_configs):
+        """Should respect stability check for cooling mode transitions."""
+        import datetime
+        
+        config = ControllerConfig(**sample_config)
+        config.stability_check_minutes = 10
+        engine = DecisionEngine(config)
+        
+        state_manager = StateManager(mock_hass, config, sample_zone_configs)
+        state_manager.all_zones_satisfied = Mock(return_value=True)
+        state_manager.all_dampers_low = Mock(return_value=True)
+        
+        # Mock recent HVAC mode change (5 minutes ago)
+        recent_time = datetime.datetime.now() - datetime.timedelta(minutes=5)
+        state_manager.get_time_since_last_hvac_mode_change = Mock(return_value=recent_time)
+        
+        # Should not switch to idle for cooling mode either
+        assert engine.should_switch_to_idle(state_manager, HVACMode.COOL) is False
+
+
+class TestStateManagerHVACModeHistory:
+    """Test StateManager HVAC mode history tracking."""
+    
+    def test_get_time_since_last_hvac_mode_change_with_history(self, mock_hass, sample_config, sample_zone_configs):
+        """Should return the time of the last HVAC mode change from Home Assistant history."""
+        import datetime
+        from unittest.mock import patch
+        
+        config = ControllerConfig(**sample_config)
+        state_manager = StateManager(mock_hass, config, sample_zone_configs)
+        
+        # Mock history data
+        now = datetime.datetime.now()
+        last_change_time = now - datetime.timedelta(minutes=10)
+        
+        mock_history = [[
+            {
+                'state': 'dry',
+                'last_changed': '2023-01-01T10:00:00Z'
+            },
+            {
+                'state': 'heat',
+                'last_changed': last_change_time.isoformat() + 'Z'
+            }
+        ]]
+        
+        mock_hass.get_history.return_value = mock_history
+        mock_hass.convert_utc.return_value = last_change_time
+        
+        # Should return the most recent change time
+        result = state_manager.get_time_since_last_hvac_mode_change()
+        assert result == last_change_time
+    
+    def test_get_time_since_last_hvac_mode_change_returns_none_with_no_history(self, mock_hass, sample_config, sample_zone_configs):
+        """Should return None when no HVAC mode history is available."""
+        config = ControllerConfig(**sample_config)
+        state_manager = StateManager(mock_hass, config, sample_zone_configs)
+        
+        # Mock empty history
+        mock_hass.get_history.return_value = []
+        
+        # Should return None when no history
+        assert state_manager.get_time_since_last_hvac_mode_change() is None
+    
+    def test_get_time_since_last_hvac_mode_change_returns_none_with_single_entry(self, mock_hass, sample_config, sample_zone_configs):
+        """Should return None when only one history entry exists (no state changes)."""
+        config = ControllerConfig(**sample_config)
+        state_manager = StateManager(mock_hass, config, sample_zone_configs)
+        
+        # Mock history with only one entry (current state, no changes)
+        mock_history = [[
+            {
+                'state': 'heat',
+                'last_changed': '2023-01-01T10:00:00Z'
+            }
+        ]]
+        
+        mock_hass.get_history.return_value = mock_history
+        
+        # Should return None when no state changes
+        assert state_manager.get_time_since_last_hvac_mode_change() is None
+    
+    def test_get_time_since_last_hvac_mode_change_handles_errors(self, mock_hass, sample_config, sample_zone_configs):
+        """Should handle errors gracefully when getting HVAC mode history."""
+        config = ControllerConfig(**sample_config)
+        state_manager = StateManager(mock_hass, config, sample_zone_configs)
+        
+        # Mock get_history to raise an exception
+        mock_hass.get_history.side_effect = Exception("Database error")
+        
+        # Should return None when error occurs
+        assert state_manager.get_time_since_last_hvac_mode_change() is None
+
+
+class TestControllerHVACModeStabilityChecking:
+    """Test SmartAirconController HVAC mode stability checking."""
+    
+    def test_should_activate_algorithm_respects_stability_check(self, mock_hass, sample_config, sample_zone_configs):
+        """Should not activate algorithm if not enough time has passed since last HVAC mode change."""
+        import datetime
+        from smart_aircon_controller.smart_aircon_controller import SmartAirconController
+        
+        # Create a mock controller with the required methods and attributes
+        controller = Mock(spec=SmartAirconController)
+        controller.static_config = ControllerConfig(**sample_config)
+        controller.static_config.stability_check_minutes = 10
+        
+        # Create state manager
+        state_manager = StateManager(mock_hass, controller.static_config, sample_zone_configs)
+        controller.state_manager = state_manager
+        
+        # Mock recent HVAC mode change (5 minutes ago)
+        recent_time = datetime.datetime.now() - datetime.timedelta(minutes=5)
+        state_manager.get_time_since_last_hvac_mode_change = Mock(return_value=recent_time)
+        state_manager.current_hvac_mode = "dry"
+        
+        # Import the actual method
+        from smart_aircon_controller.smart_aircon_controller import SmartAirconController
+        controller._should_activate_algorithm = SmartAirconController._should_activate_algorithm.__get__(controller)
+        controller.log = Mock()
+        
+        # Should not activate algorithm because not enough time has passed
+        assert controller._should_activate_algorithm(HVACMode.HEAT) is False
+    
+    def test_should_activate_algorithm_allows_after_stability_period(self, mock_hass, sample_config, sample_zone_configs):
+        """Should activate algorithm if enough time has passed since last HVAC mode change."""
+        import datetime
+        from smart_aircon_controller.smart_aircon_controller import SmartAirconController
+        
+        # Create a mock controller
+        controller = Mock(spec=SmartAirconController)
+        controller.static_config = ControllerConfig(**sample_config)
+        controller.static_config.stability_check_minutes = 10
+        
+        # Create state manager
+        state_manager = StateManager(mock_hass, controller.static_config, sample_zone_configs)
+        controller.state_manager = state_manager
+        
+        # Mock old HVAC mode change (15 minutes ago)
+        old_time = datetime.datetime.now() - datetime.timedelta(minutes=15)
+        state_manager.get_time_since_last_hvac_mode_change = Mock(return_value=old_time)
+        state_manager.current_hvac_mode = "dry"
+        
+        # Import the actual method
+        from smart_aircon_controller.smart_aircon_controller import SmartAirconController
+        controller._should_activate_algorithm = SmartAirconController._should_activate_algorithm.__get__(controller)
+        controller.log = Mock()
+        
+        # Should activate algorithm because enough time has passed
+        assert controller._should_activate_algorithm(HVACMode.HEAT) is True
+    
+    def test_should_activate_algorithm_allows_with_no_previous_changes(self, mock_hass, sample_config, sample_zone_configs):
+        """Should activate algorithm if no previous HVAC mode changes recorded."""
+        from smart_aircon_controller.smart_aircon_controller import SmartAirconController
+        
+        # Create a mock controller
+        controller = Mock(spec=SmartAirconController)
+        controller.static_config = ControllerConfig(**sample_config)
+        controller.static_config.stability_check_minutes = 10
+        
+        # Create state manager
+        state_manager = StateManager(mock_hass, controller.static_config, sample_zone_configs)
+        controller.state_manager = state_manager
+        
+        # Mock no previous HVAC mode changes
+        state_manager.get_time_since_last_hvac_mode_change = Mock(return_value=None)
+        state_manager.current_hvac_mode = "dry"
+        
+        # Import the actual method
+        controller._should_activate_algorithm = SmartAirconController._should_activate_algorithm.__get__(controller)
+        controller.log = Mock()
+        
+        # Should activate algorithm because no previous changes
+        assert controller._should_activate_algorithm(HVACMode.HEAT) is True

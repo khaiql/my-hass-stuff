@@ -372,6 +372,39 @@ class StateManager:
         zone = self.zones.get(zone_name)
         return zone.isolation if zone else False
 
+    def get_time_since_last_hvac_mode_change(self) -> Optional[datetime.datetime]:
+        """Get the time of the last HVAC mode change from Home Assistant history."""
+        try:
+            # Get history for the main climate entity for the last 24 hours
+            history = self.hass.get_history(
+                entity_id=self.config.main_climate,
+                days=1
+            )
+            
+            if not history or not history[0]:
+                return None
+            
+            # Find the most recent state change
+            entity_history = history[0]
+            if len(entity_history) < 2:
+                # No state changes in the last 24 hours
+                return None
+            
+            # Get the most recent state change (excluding the current state)
+            # The last entry is the current state, so we want the second to last
+            if len(entity_history) >= 2:
+                last_change = entity_history[-2]
+                last_changed_str = last_change.get('last_changed')
+                if last_changed_str:
+                    # Convert ISO 8601 string to datetime object
+                    return self.hass.convert_utc(last_changed_str)
+            
+            return None
+            
+        except Exception as e:
+            self.hass.log(f"Error getting HVAC mode change history: {e}")
+            return None
+
 
 class DecisionEngine:
     """Makes all control decisions based on current state."""
@@ -408,6 +441,17 @@ class DecisionEngine:
         self, state_manager: StateManager, current_mode: HVACMode
     ) -> bool:
         """Determine if system should switch to idle mode."""
+        # Check if enough time has passed since last HVAC mode change
+        last_change_time = state_manager.get_time_since_last_hvac_mode_change()
+        if last_change_time is not None:
+            import datetime
+            now = datetime.datetime.now()
+            time_diff = now - last_change_time
+            stability_threshold = datetime.timedelta(minutes=self.config.stability_check_minutes)
+            
+            if time_diff < stability_threshold:
+                return False  # Not enough time has passed
+        
         if current_mode == HVACMode.HEAT:
             # Switch to DRY if all zones satisfied and dampers are low
             return (
@@ -851,6 +895,18 @@ class SmartAirconController(hass.Hass):
         self.log(
             f"Checking activation: target={target_mode.value}, current={current_mode}"
         )
+
+        # Check if enough time has passed since last HVAC mode change
+        last_change_time = self.state_manager.get_time_since_last_hvac_mode_change()
+        if last_change_time is not None:
+            import datetime
+            now = datetime.datetime.now()
+            time_diff = now - last_change_time
+            stability_threshold = datetime.timedelta(minutes=self.static_config.stability_check_minutes)
+            
+            if time_diff < stability_threshold:
+                self.log(f"Stability check: Not enough time passed since last HVAC change ({time_diff} < {stability_threshold})")
+                return False
 
         # Activate if target mode requires heating/cooling and current mode is idle
         if target_mode in [HVACMode.HEAT, HVACMode.COOL]:
