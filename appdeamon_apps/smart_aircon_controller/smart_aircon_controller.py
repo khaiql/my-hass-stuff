@@ -471,6 +471,33 @@ class DecisionEngine:
         zones_needing_cool = state_manager.get_zones_needing_cooling()
         return len(zones_needing_cool) > 0
 
+    def should_activate_algorithm(
+        self, state_manager: StateManager, target_mode: HVACMode, current_hvac_mode: str
+    ) -> bool:
+        """Determine if algorithm should be activated."""
+        # Check if enough time has passed since last HVAC mode change (stability check)
+        last_change_time = state_manager.get_time_since_last_hvac_mode_change()
+        if last_change_time is not None:
+            import datetime
+            now = datetime.datetime.now()
+            stability_threshold = datetime.timedelta(minutes=self.config.stability_check_minutes)
+            time_diff = now - last_change_time
+            
+            if time_diff < stability_threshold:
+                return False  # Not enough time has passed
+        
+        # Activate if target mode requires heating/cooling and current mode is idle or different
+        if target_mode in [HVACMode.HEAT, HVACMode.COOL]:
+            if (
+                current_hvac_mode in ["dry", "fan", "off"] 
+                or current_hvac_mode != target_mode.value
+            ):
+                return True
+            else:
+                return False  # Already in target active mode
+        else:
+            return False  # Target mode is idle, no activation needed
+
     def should_switch_to_idle(
         self, state_manager: StateManager, current_mode: HVACMode
     ) -> bool:
@@ -1060,7 +1087,7 @@ class SmartAirconController(hass.Hass):
                         f"Algorithm activation triggered for {target_mode.value} mode"
                     )
                     self._activate_algorithm(target_mode)
-                elif self._should_switch_to_idle_mode(target_mode):
+                elif self._should_switch_to_idle_directly(target_mode):
                     self.log(f"Switching to idle mode: {target_mode.value}")
                     self._switch_to_idle_mode(target_mode)
                 else:
@@ -1091,42 +1118,17 @@ class SmartAirconController(hass.Hass):
             self.log(f"Error in periodic check: {e}")
 
     def _should_activate_algorithm(self, target_mode: HVACMode) -> bool:
-        """Determine if algorithm should be activated."""
-        current_mode = self.state_manager.current_hvac_mode
-        self.log(
-            f"Checking activation: target={target_mode.value}, current={current_mode}"
+        """Determine if algorithm should be activated.
+        
+        Delegates to DecisionEngine.should_activate_algorithm() for the actual decision logic.
+        """
+        current_hvac_mode = self.state_manager.current_hvac_mode
+        self.log(f"Checking activation: target={target_mode.value}, current={current_hvac_mode}")
+
+        # Let DecisionEngine make the decision
+        return self.decision_engine.should_activate_algorithm(
+            self.state_manager, target_mode, current_hvac_mode
         )
-
-        # Check if enough time has passed since last HVAC mode change
-        last_change_time = self.state_manager.get_time_since_last_hvac_mode_change()
-        if last_change_time is not None:
-            import datetime
-            now = datetime.datetime.now()
-            time_diff = now - last_change_time
-            stability_threshold = datetime.timedelta(minutes=self.static_config.stability_check_minutes)
-            
-            if time_diff < stability_threshold:
-                self.log(f"Stability check: Not enough time passed since last HVAC change ({time_diff} < {stability_threshold})")
-                return False
-
-        # Activate if target mode requires heating/cooling and current mode is idle
-        if target_mode in [HVACMode.HEAT, HVACMode.COOL]:
-            if (
-                current_mode in ["dry", "fan", "off"]
-                or current_mode != target_mode.value
-            ):
-                self.log(
-                    f"Activation needed: target mode {target_mode.value} requires active heating/cooling"
-                )
-                return True
-            else:
-                self.log(f"No activation needed: already in {target_mode.value} mode")
-        else:
-            self.log(
-                f"No activation needed: target mode {target_mode.value} is idle mode"
-            )
-
-        return False
 
     def _should_deactivate_algorithm(self, target_mode: HVACMode) -> bool:
         """Determine if algorithm should be deactivated."""
@@ -1146,22 +1148,36 @@ class SmartAirconController(hass.Hass):
 
         return False
 
-    def _should_switch_to_idle_mode(self, target_mode: HVACMode) -> bool:
-        """Determine if we should switch to idle mode when algorithm is inactive."""
-        current_mode = self.state_manager.current_hvac_mode
-
-        # Switch to idle if target is idle mode and current is not idle
+    def _should_switch_to_idle_directly(self, target_mode: HVACMode) -> bool:
+        """Determine if we should switch to idle mode when algorithm is inactive.
+        
+        Delegates to DecisionEngine.should_switch_to_idle() for the actual decision logic.
+        """
+        current_hvac_mode = self.state_manager.current_hvac_mode
+        
+        # Only consider switching if target is idle mode and current is not idle
         if target_mode in [HVACMode.DRY, HVACMode.FAN]:
-            if current_mode not in ["dry", "fan"]:
-                self.log(
-                    f"Should switch to idle: target={target_mode.value}, current={current_mode}"
+            if current_hvac_mode not in ["dry", "fan"]:
+                # Convert current HVAC mode string to HVACMode enum
+                current_mode_map = {
+                    "heat": HVACMode.HEAT,
+                    "cool": HVACMode.COOL,
+                    "dry": HVACMode.DRY,
+                    "fan": HVACMode.FAN,
+                    "off": HVACMode.OFF
+                }
+                
+                current_mode_enum = current_mode_map.get(current_hvac_mode, HVACMode.HEAT)
+                if current_hvac_mode not in current_mode_map:
+                    self.log(f"Unknown HVAC mode: {current_hvac_mode}, assuming HEAT")
+                
+                # Let DecisionEngine make the decision
+                return self.decision_engine.should_switch_to_idle(
+                    self.state_manager, current_mode_enum
                 )
-                return True
             else:
-                self.log(
-                    f"Already in idle mode: target={target_mode.value}, current={current_mode}"
-                )
-
+                self.log(f"Already in idle mode: target={target_mode.value}, current={current_hvac_mode}")
+        
         return False
 
     def _switch_to_idle_mode(self, target_mode: HVACMode):

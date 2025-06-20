@@ -563,83 +563,79 @@ class TestHVACModeStabilityChecking:
         assert engine.should_switch_to_idle(state_manager, HVACMode.COOL) is False
 
 
-class TestControllerHVACModeStabilityChecking:
-    """Test SmartAirconController HVAC mode stability checking."""
+class TestAlgorithmActivationStabilityChecking:
+    """Test DecisionEngine algorithm activation stability checking."""
     
     def test_should_activate_algorithm_respects_stability_check(self, mock_hass, sample_config, sample_zone_configs):
         """Should not activate algorithm if not enough time has passed since last HVAC mode change."""
         import datetime
-        from smart_aircon_controller.smart_aircon_controller import SmartAirconController
         
-        # Create a mock controller with the required methods and attributes
-        controller = Mock(spec=SmartAirconController)
-        controller.static_config = ControllerConfig(**sample_config)
-        controller.static_config.stability_check_minutes = 10
+        config = ControllerConfig(**sample_config)
+        config.stability_check_minutes = 10
+        engine = DecisionEngine(config)
         
-        # Create state manager
-        state_manager = StateManager(mock_hass, controller.static_config, sample_zone_configs)
-        controller.state_manager = state_manager
+        state_manager = StateManager(mock_hass, config, sample_zone_configs)
         
         # Mock recent HVAC mode change (5 minutes ago)
         recent_time = datetime.datetime.now() - datetime.timedelta(minutes=5)
         state_manager.get_time_since_last_hvac_mode_change = Mock(return_value=recent_time)
-        state_manager.current_hvac_mode = "dry"
-        
-        # Import the actual method
-        from smart_aircon_controller.smart_aircon_controller import SmartAirconController
-        controller._should_activate_algorithm = SmartAirconController._should_activate_algorithm.__get__(controller)
-        controller.log = Mock()
         
         # Should not activate algorithm because not enough time has passed
-        assert controller._should_activate_algorithm(HVACMode.HEAT) is False
+        assert engine.should_activate_algorithm(state_manager, HVACMode.HEAT, "dry") is False
     
     def test_should_activate_algorithm_allows_after_stability_period(self, mock_hass, sample_config, sample_zone_configs):
         """Should activate algorithm if enough time has passed since last HVAC mode change."""
         import datetime
-        from smart_aircon_controller.smart_aircon_controller import SmartAirconController
         
-        # Create a mock controller
-        controller = Mock(spec=SmartAirconController)
-        controller.static_config = ControllerConfig(**sample_config)
-        controller.static_config.stability_check_minutes = 10
+        config = ControllerConfig(**sample_config)
+        config.stability_check_minutes = 10
+        engine = DecisionEngine(config)
         
-        # Create state manager
-        state_manager = StateManager(mock_hass, controller.static_config, sample_zone_configs)
-        controller.state_manager = state_manager
+        state_manager = StateManager(mock_hass, config, sample_zone_configs)
         
         # Mock old HVAC mode change (15 minutes ago)
         old_time = datetime.datetime.now() - datetime.timedelta(minutes=15)
         state_manager.get_time_since_last_hvac_mode_change = Mock(return_value=old_time)
-        state_manager.current_hvac_mode = "dry"
-        
-        # Import the actual method
-        from smart_aircon_controller.smart_aircon_controller import SmartAirconController
-        controller._should_activate_algorithm = SmartAirconController._should_activate_algorithm.__get__(controller)
-        controller.log = Mock()
         
         # Should activate algorithm because enough time has passed
-        assert controller._should_activate_algorithm(HVACMode.HEAT) is True
+        assert engine.should_activate_algorithm(state_manager, HVACMode.HEAT, "dry") is True
     
     def test_should_activate_algorithm_allows_with_no_previous_changes(self, mock_hass, sample_config, sample_zone_configs):
         """Should activate algorithm if no previous HVAC mode changes recorded."""
-        from smart_aircon_controller.smart_aircon_controller import SmartAirconController
+        config = ControllerConfig(**sample_config)
+        config.stability_check_minutes = 10
+        engine = DecisionEngine(config)
         
-        # Create a mock controller
-        controller = Mock(spec=SmartAirconController)
-        controller.static_config = ControllerConfig(**sample_config)
-        controller.static_config.stability_check_minutes = 10
-        
-        # Create state manager
-        state_manager = StateManager(mock_hass, controller.static_config, sample_zone_configs)
-        controller.state_manager = state_manager
+        state_manager = StateManager(mock_hass, config, sample_zone_configs)
         
         # Mock no previous HVAC mode changes
         state_manager.get_time_since_last_hvac_mode_change = Mock(return_value=None)
-        state_manager.current_hvac_mode = "dry"
-        
-        # Import the actual method
-        controller._should_activate_algorithm = SmartAirconController._should_activate_algorithm.__get__(controller)
-        controller.log = Mock()
         
         # Should activate algorithm because no previous changes
-        assert controller._should_activate_algorithm(HVACMode.HEAT) is True
+        assert engine.should_activate_algorithm(state_manager, HVACMode.HEAT, "dry") is True
+    
+    def test_should_activate_algorithm_mode_transitions(self, mock_hass, sample_config, sample_zone_configs):
+        """Should activate algorithm for appropriate mode transitions."""
+        config = ControllerConfig(**sample_config)
+        engine = DecisionEngine(config)
+        
+        state_manager = StateManager(mock_hass, config, sample_zone_configs)
+        state_manager.get_time_since_last_hvac_mode_change = Mock(return_value=None)
+        
+        # Should activate when going from idle to active modes
+        assert engine.should_activate_algorithm(state_manager, HVACMode.HEAT, "dry") is True
+        assert engine.should_activate_algorithm(state_manager, HVACMode.HEAT, "fan") is True
+        assert engine.should_activate_algorithm(state_manager, HVACMode.COOL, "dry") is True
+        assert engine.should_activate_algorithm(state_manager, HVACMode.COOL, "fan") is True
+        
+        # Should activate when switching between active modes
+        assert engine.should_activate_algorithm(state_manager, HVACMode.HEAT, "cool") is True
+        assert engine.should_activate_algorithm(state_manager, HVACMode.COOL, "heat") is True
+        
+        # Should not activate when already in target mode
+        assert engine.should_activate_algorithm(state_manager, HVACMode.HEAT, "heat") is False
+        assert engine.should_activate_algorithm(state_manager, HVACMode.COOL, "cool") is False
+        
+        # Should not activate for idle target modes
+        assert engine.should_activate_algorithm(state_manager, HVACMode.DRY, "heat") is False
+        assert engine.should_activate_algorithm(state_manager, HVACMode.FAN, "cool") is False
