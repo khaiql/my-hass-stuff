@@ -131,21 +131,21 @@ namespace esphome
       return true;
     }
 
-    bool LitterRobotPresenceDetector::decode_jpg(camera_fb_t *rb)
+    bool LitterRobotPresenceDetector::decode_jpg(const std::shared_ptr<esphome::camera::CameraImage> &image)
     {
       TfLiteTensor *input = this->interpreter->input(0);
 
       // Safety check: ensure decoded image fits in tensor input
       // Assuming RGB888 output (3 bytes per pixel)
-      size_t required_size = rb->width * rb->height * 3 * sizeof(uint8_t);
+      size_t required_size = image->get_data_length();
       if (required_size > input->bytes)
       {
         ESP_LOGE(TAG, "Decoded image size (%d) exceeds tensor input size (%d). Check camera resolution.", required_size, input->bytes);
         return false;
       }
 
-      esp_jpeg_image_cfg_t jpeg_cfg = {.indata = (uint8_t *)rb->buf,
-                                       .indata_size = rb->len,
+      esp_jpeg_image_cfg_t jpeg_cfg = {.indata = image->get_data_buffer(),
+                                       .indata_size = image->get_data_length(),
                                        .outbuf = input->data.uint8, // Decode directly to tensor input
                                        .outbuf_size = input->bytes,
                                        .out_format = JPEG_IMAGE_FORMAT_RGB888,
@@ -249,21 +249,24 @@ namespace esphome
 
       this->semaphore_ = xSemaphoreCreateBinary();
 
-      camera::Camera::instance()->add_listener([this](const std::shared_ptr<esphome::camera::CameraImage> &image)
-                                               {
-        ESP_LOGD(TAG, "received image");
-        if (image->was_requested_by(esp32_camera::API_REQUESTER)) {
-          {
-            std::lock_guard<std::mutex> lock(this->image_lock_);
-            this->image_ = std::move(image);
-          }
-          xSemaphoreGive(this->semaphore_);
-        } });
-
+      camera::Camera::instance()->add_listener(this);
       // Create inference task on Core 1 (App Core) with 8KB stack
       xTaskCreatePinnedToCore(inference_task_trampoline, "inference_task", 8192, this, 1, &this->inference_task_handle_, 1);
 
       ESP_LOGD(TAG, "setup litter robot presence detector successfully");
+    }
+
+    void LitterRobotPresenceDetector::on_camera_image(const std::shared_ptr<camera::CameraImage> &image)
+    {
+      ESP_LOGD(TAG, "received image");
+      if (image->was_requested_by(camera::API_REQUESTER))
+      {
+        {
+          std::lock_guard<std::mutex> lock(this->image_lock_);
+          this->image_ = std::move(image);
+        }
+        xSemaphoreGive(this->semaphore_);
+      }
     }
 
     void LitterRobotPresenceDetector::loop()
@@ -315,11 +318,11 @@ namespace esphome
     }
     bool LitterRobotPresenceDetector::start_infer(std::shared_ptr<esphome::camera::CameraImage> image)
     {
-      camera_fb_t *rb = image->get_raw_buffer();
-      ESP_LOGD(TAG, " Received image size width=%d height=%d", rb->width, rb->height);
+      uint8_t *buf = image->get_data_buffer();
+      ESP_LOGD(TAG, " Received image size=%d", image->get_data_length());
 
       uint32_t prior_invoke = millis();
-      if (!this->decode_jpg(rb))
+      if (!this->decode_jpg(image))
       {
         ESP_LOGE(TAG, "cant decode to rgb");
         return false;

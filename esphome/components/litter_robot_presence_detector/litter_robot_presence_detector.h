@@ -25,7 +25,7 @@ namespace esphome
     constexpr size_t PREDICTION_HISTORY_SIZE = 7;
     static const std::string CLASSES[] = {"empty", "nachi", "ngao"};
 
-    class LitterRobotPresenceDetector : public Component, public text_sensor::TextSensor
+    class LitterRobotPresenceDetector : public Component, public text_sensor::TextSensor, public camera::CameraListener
     {
     public:
       // constructor
@@ -49,6 +49,7 @@ namespace esphome
       TaskHandle_t inference_task_handle_{nullptr};
       static void inference_task_trampoline(void *params);
       void inference_task();
+      void on_camera_image(const std::shared_ptr<esphome::camera::CameraImage> &image) override;
 
       std::string pending_state_;
       std::atomic<bool> result_ready_{false};
@@ -66,7 +67,7 @@ namespace esphome
       bool start_infer(std::shared_ptr<esphome::camera::CameraImage> image);
       int get_prediction_result();
       int decide_state(int max_index);
-      bool decode_jpg(camera_fb_t *rb);
+      bool decode_jpg(const std::shared_ptr<esphome::camera::CameraImage> &image);
     };
   } // namespace litter_robot_presence_detector
 } // namespace esphome
