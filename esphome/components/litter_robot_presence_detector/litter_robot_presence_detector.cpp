@@ -98,27 +98,21 @@ namespace esphome
         return false;
       }
 
-      if (micro_op_resolver.AddLeakyRelu() != kTfLiteOk)
+      if (micro_op_resolver.AddRelu() != kTfLiteOk)
       {
-        ESP_LOGE(TAG, "failed to register ops AddLeakyRelu");
+        ESP_LOGE(TAG, "failed to register ops AddRelu");
         return false;
       }
 
-      if (micro_op_resolver.AddMaxPool2D() != kTfLiteOk)
+      if (micro_op_resolver.AddDepthwiseConv2D != kTfLiteOk)
       {
-        ESP_LOGE(TAG, "failed to register ops AddMaxPool2D");
+        ESP_LOGE(TAG, "failed to register ops AddDepthwiseConv2D");
         return false;
       }
 
       if (micro_op_resolver.AddFullyConnected() != kTfLiteOk)
       {
         ESP_LOGE(TAG, "failed to register ops AddFullyConnected");
-        return false;
-      }
-
-      if (micro_op_resolver.AddReshape() != kTfLiteOk)
-      {
-        ESP_LOGE(TAG, "failed to register ops AddReshape");
         return false;
       }
 
@@ -140,13 +134,14 @@ namespace esphome
     bool LitterRobotPresenceDetector::decode_jpg(camera_fb_t *rb)
     {
       TfLiteTensor *input = this->interpreter->input(0);
-      
+
       // Safety check: ensure decoded image fits in tensor input
       // Assuming RGB888 output (3 bytes per pixel)
       size_t required_size = rb->width * rb->height * 3 * sizeof(uint8_t);
-      if (required_size > input->bytes) {
-          ESP_LOGE(TAG, "Decoded image size (%d) exceeds tensor input size (%d). Check camera resolution.", required_size, input->bytes);
-          return false;
+      if (required_size > input->bytes)
+      {
+        ESP_LOGE(TAG, "Decoded image size (%d) exceeds tensor input size (%d). Check camera resolution.", required_size, input->bytes);
+        return false;
       }
 
       esp_jpeg_image_cfg_t jpeg_cfg = {.indata = (uint8_t *)rb->buf,
@@ -172,14 +167,16 @@ namespace esphome
       // If inference_input_type was not strictly enforced or if the model
       // lacks a Cast/Quantize op at the entry, the input tensor might be int8.
       // Passing raw uint8 [0,255] results in wrapping (128 becomes -128), ruining predictions.
-      if (input->type == kTfLiteInt8) {
-          uint8_t* data = input->data.uint8; 
-          for (size_t i = 0; i < input->bytes; i++) {
-              // xor 0x80 is equivalent to subtracting 128 for byte-sized values
-              // 0 (0x00) ^ 0x80 = 128 (0x80) -> interpreted as -128
-              // 255 (0xFF) ^ 0x80 = 127 (0x7F) -> interpreted as 127
-              data[i] ^= 0x80;
-          }
+      if (input->type == kTfLiteInt8)
+      {
+        uint8_t *data = input->data.uint8;
+        for (size_t i = 0; i < input->bytes; i++)
+        {
+          // xor 0x80 is equivalent to subtracting 128 for byte-sized values
+          // 0 (0x00) ^ 0x80 = 128 (0x80) -> interpreted as -128
+          // 255 (0xFF) ^ 0x80 = 127 (0x7F) -> interpreted as 127
+          data[i] ^= 0x80;
+        }
       }
 
       ESP_LOGD(TAG, "out img width=%d height=%d", outimg.width, outimg.height);
@@ -261,8 +258,7 @@ namespace esphome
             this->image_ = std::move(image);
           }
           xSemaphoreGive(this->semaphore_);
-        } 
-      });
+        } });
 
       // Create inference task on Core 1 (App Core) with 8KB stack
       xTaskCreatePinnedToCore(inference_task_trampoline, "inference_task", 8192, this, 1, &this->inference_task_handle_, 1);
@@ -305,11 +301,12 @@ namespace esphome
     std::shared_ptr<esphome::esp32_camera::CameraImage> LitterRobotPresenceDetector::wait_for_image_()
     {
       std::shared_ptr<esphome::esp32_camera::CameraImage> image;
-      
+
       // Wait for the "doorbell" (callback) to signal that data is ready
-      // 200 ticks = 2 seconds (assuming 10ms ticks) or 200ms depending on config. 
+      // 200 ticks = 2 seconds (assuming 10ms ticks) or 200ms depending on config.
       // Safe upper bound since camera should be fast.
-      if (xSemaphoreTake(this->semaphore_, 200) == pdTRUE) {
+      if (xSemaphoreTake(this->semaphore_, 200) == pdTRUE)
+      {
         std::lock_guard<std::mutex> lock(this->image_lock_);
         image.swap(this->image_);
       }
