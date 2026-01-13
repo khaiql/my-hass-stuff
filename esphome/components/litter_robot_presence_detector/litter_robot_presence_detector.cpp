@@ -58,7 +58,7 @@ namespace esphome
           continue;
         }
 
-        esp32_camera::global_esp32_camera->request_image(esphome::esp32_camera::API_REQUESTER);
+        camera::Camera::instance()->request_image(esphome::esp32_camera::API_REQUESTER);
         auto image = this->wait_for_image_();
 
         if (!image)
@@ -233,7 +233,7 @@ namespace esphome
       ESP_LOGD(TAG, "Begin setup");
 
       // SETUP CAMERA
-      if (!esp32_camera::global_esp32_camera || esp32_camera::global_esp32_camera->is_failed())
+      if (!camera::Camera::instance() || camera::Camera::instance()->is_failed())
       {
         ESP_LOGW(TAG, "setup litter robot presence detector failed");
         this->mark_failed();
@@ -249,8 +249,8 @@ namespace esphome
 
       this->semaphore_ = xSemaphoreCreateBinary();
 
-      esp32_camera::global_esp32_camera->add_image_callback([this](std::shared_ptr<esp32_camera::CameraImage> image)
-                                                            {
+      camera::Camera::instance()->add_listener([this](const std::shared_ptr<CameraImage> &image)
+                                               {
         ESP_LOGD(TAG, "received image");
         if (image->was_requested_by(esp32_camera::API_REQUESTER)) {
           {

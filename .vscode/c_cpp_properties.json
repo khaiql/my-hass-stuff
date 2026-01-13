@@ -1,0 +1,19 @@
+{
+    "configurations": [
+        {
+            "name": "Mac",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "/Users/sle/Projects/esphome/esphome/**",
+                "/Users/sle/Projects/esphome",
+                "/Users/sle/Projects/esphome/.pio/libdeps/esp8266-arduino/ArduinoJson"
+            ],
+            "defines": [],
+            "compilerPath": "/usr/bin/clang",
+            "cStandard": "c17",
+            "cppStandard": "c++14",
+            "intelliSenseMode": "macos-clang-arm64"
+        }
+    ],
+    "version": 4
+}

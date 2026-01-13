@@ -23,7 +23,7 @@ namespace esphome
   {
 
     constexpr size_t PREDICTION_HISTORY_SIZE = 7;
-    static std::string CLASSES[] = {"empty", "nachi", "ngao"};
+    static const std::string CLASSES[] = {"empty", "nachi", "ngao"};
 
     class LitterRobotPresenceDetector : public Component, public text_sensor::TextSensor
     {
@@ -49,7 +49,7 @@ namespace esphome
       TaskHandle_t inference_task_handle_{nullptr};
       static void inference_task_trampoline(void *params);
       void inference_task();
-      
+
       std::string pending_state_;
       std::atomic<bool> result_ready_{false};
 
