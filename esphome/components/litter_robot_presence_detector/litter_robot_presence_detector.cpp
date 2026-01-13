@@ -58,7 +58,7 @@ namespace esphome
           continue;
         }
 
-        camera::Camera::instance()->request_image(esphome::esp32_camera::API_REQUESTER);
+        camera::Camera::instance()->request_image(esphome::camera::API_REQUESTER);
         auto image = this->wait_for_image_();
 
         if (!image)
@@ -147,7 +147,7 @@ namespace esphome
       esp_jpeg_image_cfg_t jpeg_cfg = {.indata = (uint8_t *)rb->buf,
                                        .indata_size = rb->len,
                                        .outbuf = input->data.uint8, // Decode directly to tensor input
-                                       .outbuf_size = static_cast<int>(input->bytes),
+                                       .outbuf_size = input->bytes,
                                        .out_format = JPEG_IMAGE_FORMAT_RGB888,
                                        .out_scale = JPEG_IMAGE_SCALE_0,
                                        .flags = {
@@ -249,7 +249,7 @@ namespace esphome
 
       this->semaphore_ = xSemaphoreCreateBinary();
 
-      camera::Camera::instance()->add_listener([this](const std::shared_ptr<CameraImage> &image)
+      camera::Camera::instance()->add_listener([this](const std::shared_ptr<esphome::camera::CameraImage> &image)
                                                {
         ESP_LOGD(TAG, "received image");
         if (image->was_requested_by(esp32_camera::API_REQUESTER)) {
@@ -298,9 +298,9 @@ namespace esphome
       ESP_LOGCONFIG(TAG, "  - output_type: %d", output->type);
     }
 
-    std::shared_ptr<esphome::esp32_camera::CameraImage> LitterRobotPresenceDetector::wait_for_image_()
+    std::shared_ptr<esphome::camera::CameraImage> LitterRobotPresenceDetector::wait_for_image_()
     {
-      std::shared_ptr<esphome::esp32_camera::CameraImage> image;
+      std::shared_ptr<esphome::camera::CameraImage> image;
 
       // Wait for the "doorbell" (callback) to signal that data is ready
       // 200 ticks = 2 seconds (assuming 10ms ticks) or 200ms depending on config.
@@ -313,7 +313,7 @@ namespace esphome
 
       return image;
     }
-    bool LitterRobotPresenceDetector::start_infer(std::shared_ptr<esphome::esp32_camera::CameraImage> image)
+    bool LitterRobotPresenceDetector::start_infer(std::shared_ptr<esphome::camera::CameraImage> image)
     {
       camera_fb_t *rb = image->get_raw_buffer();
       ESP_LOGD(TAG, " Received image size width=%d height=%d", rb->width, rb->height);
@@ -409,4 +409,3 @@ namespace esphome
     }
   } // namespace litter_robot_presence_detector
 } // namespace esphome
-#endif
