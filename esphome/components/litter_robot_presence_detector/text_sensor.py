@@ -36,16 +36,9 @@ async def to_code(config):
     # cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
-    esp32.add_idf_component(
-        name="esp-tflite-micro",
-        repo="https://github.com/espressif/esp-tflite-micro",
-    )
+    esp32.add_idf_component(name="espressif/esp-tflite-micro", ref="1.3.5")
 
-    esp32.add_idf_component(
-        name="esp_jpeg",
-        repo="https://github.com/espressif/idf-extra-components",
-        path="esp_jpeg",
-    )
+    esp32.add_idf_component(name="espressif/esp_jpeg", ref="1.3.1")
 
     if config[CONF_USE_EMA]:
         cg.add_define("USE_EMA")
