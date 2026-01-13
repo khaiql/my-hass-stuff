@@ -104,7 +104,7 @@ namespace esphome
         return false;
       }
 
-      if (micro_op_resolver.AddDepthwiseConv2D != kTfLiteOk)
+      if (micro_op_resolver.AddDepthwiseConv2D() != kTfLiteOk)
       {
         ESP_LOGE(TAG, "failed to register ops AddDepthwiseConv2D");
         return false;

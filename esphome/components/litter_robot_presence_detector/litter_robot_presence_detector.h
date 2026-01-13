@@ -38,9 +38,9 @@ namespace esphome
       float get_setup_priority() const override;
 
     protected:
-      std::shared_ptr<esphome::esp32_camera::CameraImage> wait_for_image_();
+      std::shared_ptr<esphome::camera::CameraImage> wait_for_image_();
       SemaphoreHandle_t semaphore_;
-      std::shared_ptr<esphome::esp32_camera::CameraImage> image_;
+      std::shared_ptr<esphome::camera::CameraImage> image_;
       std::mutex image_lock_;
       uint8_t *tensor_arena_{nullptr};
       const tflite::Model *model{nullptr};
@@ -63,12 +63,10 @@ namespace esphome
 
       bool setup_model();
       bool register_preprocessor_ops(tflite::MicroMutableOpResolver<9> &micro_op_resolver);
-      bool start_infer(std::shared_ptr<esphome::esp32_camera::CameraImage> image);
+      bool start_infer(std::shared_ptr<esphome::camera::CameraImage> image);
       int get_prediction_result();
       int decide_state(int max_index);
       bool decode_jpg(camera_fb_t *rb);
     };
   } // namespace litter_robot_presence_detector
 } // namespace esphome
-
-#endif
