@@ -233,7 +233,7 @@ class StateManager:
                 zone.current_temp = (
                     float(current_temp) if current_temp is not None else 0.0
                 )
-                
+
                 # Use effective target temp (stored sensor value if in idle mode)
                 if self.controller_ref:
                     zone.target_temp = self.controller_ref._get_effective_target_temp(
@@ -318,14 +318,14 @@ class StateManager:
 
             if mode == HVACMode.HEAT:
                 # Satisfied if temp > target (exceeded target)
-                if zone.current_temp <= zone.target_temp:
-                    return False
+                if zone.current_temp > zone.target_temp:
+                    return True
             elif mode == HVACMode.COOL:
                 # Satisfied if temp < target (cooled below target)
-                if zone.current_temp >= zone.target_temp:
-                    return False
+                if zone.current_temp < zone.target_temp:
+                    return True
 
-        return True
+        return False
 
     def all_dampers_low(self, threshold: int = 10) -> bool:
         """Check if all active zone dampers are below threshold."""
@@ -334,31 +334,6 @@ class StateManager:
             return True
 
         return all(zone.damper_position <= threshold for zone in active_zones)
-
-    def is_temperature_stable(
-        self, zone_name: str, minutes: int = 5, threshold: float = 0.1
-    ) -> bool:
-        """Check if zone temperature has been stable for given time."""
-        if zone_name not in self.temperature_history:
-            return False
-
-        now = datetime.datetime.now()
-        check_time = now - datetime.timedelta(minutes=minutes)
-
-        # Get readings from the stability check period
-        stable_readings = [
-            temp
-            for time, temp in self.temperature_history[zone_name]
-            if time >= check_time
-        ]
-
-        if len(stable_readings) < 3:  # Need enough data points
-            return False
-
-        # Check if temperature has been stable within threshold
-        min_temp = min(stable_readings)
-        max_temp = max(stable_readings)
-        return max_temp - min_temp <= threshold
 
     def get_zone_state(self, zone_name: str) -> Optional[ZoneState]:
         """Get state for a specific zone."""
@@ -379,38 +354,37 @@ class StateManager:
             # Get history for the main climate entity for the last 2 hours
             start_time = datetime.datetime.now() - datetime.timedelta(hours=2)
             history = self.hass.get_history(
-                entity_id=self.config.main_climate,
-                start_time=start_time
+                entity_id=self.config.main_climate, start_time=start_time
             )
-            
+
             if not history or not history[0]:
                 return None
-            
+
             # Get the entity history list
             entity_history = history[0]
             if len(entity_history) < 2:
                 # No history or not enough entries to determine a change
                 return None
-            
+
             # Find the most recent HVAC mode change by looking for state changes
             # History is ordered chronologically, so we iterate from newest to oldest
             current_state = None
-            
+
             for i, entry in enumerate(reversed(entity_history)):
-                entry_state = entry.get('state')
-                
+                entry_state = entry.get("state")
+
                 if current_state is None:
                     # First entry (most recent)
                     current_state = entry_state
                     continue
-                
+
                 # Check if this entry has a different state (mode change)
                 if entry_state != current_state:
                     # Found a mode change! The entry at index i-1 (in reversed order)
                     # is when the current mode started
-                    change_entry = list(reversed(entity_history))[i-1]
-                    last_changed = change_entry.get('last_changed')
-                    
+                    change_entry = list(reversed(entity_history))[i - 1]
+                    last_changed = change_entry.get("last_changed")
+
                     # last_changed is already a datetime object, but may be timezone-aware
                     # Convert to naive datetime for consistent comparison with datetime.now()
                     if isinstance(last_changed, datetime.datetime):
@@ -419,22 +393,24 @@ class StateManager:
                             last_changed = last_changed.replace(tzinfo=None)
                         return last_changed
                     else:
-                        self.hass.log(f"Unexpected last_changed type: {type(last_changed)}")
+                        self.hass.log(
+                            f"Unexpected last_changed type: {type(last_changed)}"
+                        )
                         return None
-            
+
             # If we get here, no mode changes were found in the history
             # Return the timestamp of the oldest entry we have
             if len(entity_history) > 0:
                 oldest_entry = entity_history[0]
-                last_changed = oldest_entry.get('last_changed')
+                last_changed = oldest_entry.get("last_changed")
                 if isinstance(last_changed, datetime.datetime):
                     if last_changed.tzinfo is not None:
                         # Convert timezone-aware datetime to naive (local time)
                         last_changed = last_changed.replace(tzinfo=None)
                     return last_changed
-            
+
             return None
-            
+
         except Exception as e:
             self.hass.log(f"Error getting HVAC mode change history: {e}")
             return None
@@ -449,11 +425,11 @@ class DecisionEngine:
     def get_idle_mode(self, smart_hvac_mode: str) -> HVACMode:
         """Get appropriate idle mode based on smart HVAC mode"""
         if smart_hvac_mode == "heat":
-            return HVACMode.DRY
+            return HVACMode.OFF
         elif smart_hvac_mode == "cool":
             return HVACMode.FAN
         else:
-            return HVACMode.DRY  # Default fallback
+            return HVACMode.OFF  # Default fallback
 
     def should_activate_heating(self, state_manager: StateManager) -> bool:
         """Determine if heating should be activated."""
@@ -471,7 +447,7 @@ class DecisionEngine:
         zones_needing_cool = state_manager.get_zones_needing_cooling()
         return len(zones_needing_cool) > 0
 
-    def should_activate_algorithm(
+    def should_turn_on_aircon(
         self, state_manager: StateManager, target_mode: HVACMode, current_hvac_mode: str
     ) -> bool:
         """Determine if algorithm should be activated."""
@@ -479,17 +455,20 @@ class DecisionEngine:
         last_change_time = state_manager.get_time_since_last_hvac_mode_change()
         if last_change_time is not None:
             import datetime
+
             now = datetime.datetime.now()
-            stability_threshold = datetime.timedelta(minutes=self.config.stability_check_minutes)
+            stability_threshold = datetime.timedelta(
+                minutes=self.config.stability_check_minutes
+            )
             time_diff = now - last_change_time
-            
+
             if time_diff < stability_threshold:
                 return False  # Not enough time has passed
-        
+
         # Activate if target mode requires heating/cooling and current mode is idle or different
         if target_mode in [HVACMode.HEAT, HVACMode.COOL]:
             if (
-                current_hvac_mode in ["dry", "fan", "off"] 
+                current_hvac_mode in ["dry", "fan", "off"]
                 or current_hvac_mode != target_mode.value
             ):
                 return True
@@ -506,13 +485,16 @@ class DecisionEngine:
         last_change_time = state_manager.get_time_since_last_hvac_mode_change()
         if last_change_time is not None:
             import datetime
+
             now = datetime.datetime.now()
             time_diff = now - last_change_time
-            stability_threshold = datetime.timedelta(minutes=self.config.stability_check_minutes)
-            
+            stability_threshold = datetime.timedelta(
+                minutes=self.config.stability_check_minutes
+            )
+
             if time_diff < stability_threshold:
                 return False  # Not enough time has passed
-        
+
         if current_mode == HVACMode.HEAT:
             # Switch to DRY if all zones satisfied and dampers are low
             return (
@@ -611,7 +593,9 @@ class DecisionEngine:
 class Executor:
     """Executes decisions via Home Assistant API calls."""
 
-    def __init__(self, hass_api, config: ControllerConfig, static_config: ControllerConfig):
+    def __init__(
+        self, hass_api, config: ControllerConfig, static_config: ControllerConfig
+    ):
         self.hass = hass_api
         self.config = config
         self.static_config = static_config
@@ -621,7 +605,7 @@ class Executor:
         if self.static_config.dry_run:
             self.hass.log(f"🔥 DRY RUN: Would set HVAC mode to {mode.value}")
             return
-            
+
         try:
             self.hass.call_service(
                 "climate/set_hvac_mode",
@@ -641,9 +625,11 @@ class Executor:
             for zone_name, position in positions.items():
                 zone = state_manager.get_zone_state(zone_name)
                 if zone:
-                    self.hass.log(f"  - {zone_name}: {position}% (entity: {zone.damper_entity})")
+                    self.hass.log(
+                        f"  - {zone_name}: {position}% (entity: {zone.damper_entity})"
+                    )
             return
-            
+
         for zone_name, position in positions.items():
             zone = state_manager.get_zone_state(zone_name)
             if not zone:
@@ -674,10 +660,18 @@ class Executor:
 
         self.set_damper_positions(positions, state_manager)
 
-    def set_zone_temperature_with_retry(self, entity_id: str, target_temp: float, callback=None, max_retries: int = 3, wait_seconds: float = 2.0, tolerance: float = 0.1):
+    def set_zone_temperature_with_retry(
+        self,
+        entity_id: str,
+        target_temp: float,
+        callback=None,
+        max_retries: int = 3,
+        wait_seconds: float = 2.0,
+        tolerance: float = 0.1,
+    ):
         """
         Set zone temperature with retry logic using AppDaemon scheduler.
-        
+
         Args:
             entity_id: Climate entity ID to set temperature for
             target_temp: Target temperature to set
@@ -685,31 +679,33 @@ class Executor:
             max_retries: Maximum number of attempts (default: 3)
             wait_seconds: Wait time between attempts in seconds (default: 2.0)
             tolerance: Temperature tolerance for considering success (default: 0.1°C)
-            
+
         Note: This is an async method that uses AppDaemon's scheduler.
               If callback is provided, it will be called with success status.
               If no callback is provided, initial attempt is made synchronously for testing.
         """
         if self.static_config.dry_run:
-            self.hass.log(f"🔥 DRY RUN: Would set {entity_id} temperature to {target_temp}°C")
+            self.hass.log(
+                f"🔥 DRY RUN: Would set {entity_id} temperature to {target_temp}°C"
+            )
             if callback:
                 callback(True)
             return True
-            
+
         # Store retry context
         retry_context = {
-            'entity_id': entity_id,
-            'target_temp': target_temp,
-            'callback': callback,
-            'max_retries': max_retries,
-            'wait_seconds': wait_seconds,
-            'tolerance': tolerance,
-            'current_attempt': 1
+            "entity_id": entity_id,
+            "target_temp": target_temp,
+            "callback": callback,
+            "max_retries": max_retries,
+            "wait_seconds": wait_seconds,
+            "tolerance": tolerance,
+            "current_attempt": 1,
         }
-        
+
         # Make the first attempt
-        self._attempt_temperature_setting(retry_context)
-        
+        self._attempt_temperature_setting(retry_context=retry_context)
+
         # For testing compatibility, if no callback provided, try immediate verification
         if callback is None:
             try:
@@ -721,88 +717,125 @@ class Executor:
             except:
                 pass
             return False
-    
-    def _attempt_temperature_setting(self, retry_context):
+
+    def _attempt_temperature_setting(self, **kwargs):
         """Internal method to attempt temperature setting."""
-        entity_id = retry_context['entity_id']
-        target_temp = retry_context['target_temp']
-        attempt = retry_context['current_attempt']
-        max_retries = retry_context['max_retries']
-        
+        # Extract retry_context from kwargs when called by run_in
+        retry_context = kwargs.get("retry_context")
+        if retry_context is None:
+            # Handle direct calls where retry_context might be the first positional arg
+            # This shouldn't happen in normal operation but keeps compatibility
+            raise ValueError("retry_context not found in kwargs")
+
+        entity_id = retry_context["entity_id"]
+        target_temp = retry_context["target_temp"]
+        attempt = retry_context["current_attempt"]
+        max_retries = retry_context["max_retries"]
+
         try:
             # Set the temperature
             self.hass.call_service(
-                "climate/set_temperature",
-                entity_id=entity_id,
-                temperature=target_temp
+                "climate/set_temperature", entity_id=entity_id, temperature=target_temp
             )
-            self.hass.log(f"Attempt {attempt}: Set {entity_id} temperature to {target_temp}°C")
-            
+            self.hass.log(
+                f"Attempt {attempt}: Set {entity_id} temperature to {target_temp}°C"
+            )
+
             # Schedule verification after wait period
-            self.hass.run_in(self._verify_temperature_setting, retry_context['wait_seconds'], retry_context=retry_context)
-            
+            self.hass.run_in(
+                self._verify_temperature_setting,
+                retry_context["wait_seconds"],
+                retry_context=retry_context,
+            )
+
         except Exception as e:
-            self.hass.log(f"Error setting temperature for {entity_id} (attempt {attempt}/{max_retries}): {e}")
+            self.hass.log(
+                f"Error setting temperature for {entity_id} (attempt {attempt}/{max_retries}): {e}"
+            )
             if attempt < max_retries:
                 # Schedule retry
-                retry_context['current_attempt'] += 1
-                self.hass.run_in(self._attempt_temperature_setting, retry_context['wait_seconds'], retry_context=retry_context)
+                retry_context["current_attempt"] += 1
+                self.hass.run_in(
+                    self._attempt_temperature_setting,
+                    retry_context["wait_seconds"],
+                    retry_context=retry_context,
+                )
             else:
                 # Final failure
-                self.hass.log(f"❌ Failed to set {entity_id} temperature to {target_temp}°C after {max_retries} attempts")
-                if retry_context['callback']:
-                    retry_context['callback'](False)
-    
-    def _verify_temperature_setting(self, kwargs):
+                self.hass.log(
+                    f"❌ Failed to set {entity_id} temperature to {target_temp}°C after {max_retries} attempts"
+                )
+                if retry_context["callback"]:
+                    retry_context["callback"](False)
+
+    def _verify_temperature_setting(self, **kwargs):
         """Internal method to verify temperature setting and handle retries."""
-        retry_context = kwargs['retry_context']
-        entity_id = retry_context['entity_id']
-        target_temp = retry_context['target_temp']
-        tolerance = retry_context['tolerance']
-        attempt = retry_context['current_attempt']
-        max_retries = retry_context['max_retries']
-        
+        retry_context = kwargs["retry_context"]
+        entity_id = retry_context["entity_id"]
+        target_temp = retry_context["target_temp"]
+        tolerance = retry_context["tolerance"]
+        attempt = retry_context["current_attempt"]
+        max_retries = retry_context["max_retries"]
+
         try:
             entity = self.hass.get_entity(entity_id)
             current_target = entity.attributes.get("temperature")
-            
+
             if current_target is None:
-                self.hass.log(f"Warning: Cannot verify temperature for {entity_id} - no temperature attribute")
+                self.hass.log(
+                    f"Warning: Cannot verify temperature for {entity_id} - no temperature attribute"
+                )
                 success = False
             else:
                 current_target = float(current_target)
                 success = abs(current_target - target_temp) <= tolerance
-                
+
                 if success:
-                    self.hass.log(f"✅ Successfully set {entity_id} temperature to {current_target}°C (target: {target_temp}°C)")
+                    self.hass.log(
+                        f"✅ Successfully set {entity_id} temperature to {current_target}°C (target: {target_temp}°C)"
+                    )
                 else:
-                    self.hass.log(f"⚠️ Temperature mismatch for {entity_id}: got {current_target}°C, expected {target_temp}°C (attempt {attempt}/{max_retries})")
-            
+                    self.hass.log(
+                        f"⚠️ Temperature mismatch for {entity_id}: got {current_target}°C, expected {target_temp}°C (attempt {attempt}/{max_retries})"
+                    )
+
             if success:
                 # Success - call callback if provided
-                if retry_context['callback']:
-                    retry_context['callback'](True)
+                if retry_context["callback"]:
+                    retry_context["callback"](True)
             elif attempt < max_retries:
                 # Retry needed
-                retry_context['current_attempt'] += 1
-                self.hass.run_in(self._attempt_temperature_setting, retry_context['wait_seconds'], retry_context=retry_context)
+                retry_context["current_attempt"] += 1
+                self.hass.run_in(
+                    self._attempt_temperature_setting,
+                    retry_context["wait_seconds"],
+                    retry_context=retry_context,
+                )
             else:
                 # Final failure
-                self.hass.log(f"❌ Failed to set {entity_id} temperature to {target_temp}°C after {max_retries} attempts")
-                if retry_context['callback']:
-                    retry_context['callback'](False)
-                    
+                self.hass.log(
+                    f"❌ Failed to set {entity_id} temperature to {target_temp}°C after {max_retries} attempts"
+                )
+                if retry_context["callback"]:
+                    retry_context["callback"](False)
+
         except Exception as e:
             self.hass.log(f"Error verifying temperature for {entity_id}: {e}")
             if attempt < max_retries:
                 # Retry on verification error
-                retry_context['current_attempt'] += 1
-                self.hass.run_in(self._attempt_temperature_setting, retry_context['wait_seconds'], retry_context=retry_context)
+                retry_context["current_attempt"] += 1
+                self.hass.run_in(
+                    self._attempt_temperature_setting,
+                    retry_context["wait_seconds"],
+                    retry_context=retry_context,
+                )
             else:
                 # Final failure
-                self.hass.log(f"❌ Failed to verify {entity_id} temperature after {max_retries} attempts")
-                if retry_context['callback']:
-                    retry_context['callback'](False)
+                self.hass.log(
+                    f"❌ Failed to verify {entity_id} temperature after {max_retries} attempts"
+                )
+                if retry_context["callback"]:
+                    retry_context["callback"](False)
 
 
 class Monitor:
@@ -928,7 +961,9 @@ class SmartAirconController(hass.Hass):
         # Initialize components
         config = self.config_manager.get_config()
         self.state_manager = StateManager(self, config, self.args.get("zones", {}))
-        self.state_manager.controller_ref = self  # Set reference for effective target temp
+        self.state_manager.controller_ref = (
+            self  # Set reference for effective target temp
+        )
         self.decision_engine = DecisionEngine(config)
         self.executor = Executor(self, config, self.static_config)
         self.monitor = Monitor(config)
@@ -1047,15 +1082,19 @@ class SmartAirconController(hass.Hass):
 
             # Early exit if no active zones - do nothing and leave HVAC state unchanged
             if not active_zones:
-                self.log("ℹ️  No active zones detected - automation will do nothing (zones not managed)")
-                
+                self.log(
+                    "ℹ️  No active zones detected - automation will do nothing (zones not managed)"
+                )
+
                 # Deactivate algorithm if running, but don't change HVAC state
                 if self.algorithm_active:
-                    self.log("Deactivating algorithm due to no active zones, leaving HVAC state unchanged")
+                    self.log(
+                        "Deactivating algorithm due to no active zones, leaving HVAC state unchanged"
+                    )
                     self.algorithm_active = False
                     self.current_algorithm_mode = None
                     self.monitor.stop_monitoring()
-                
+
                 self.log("=== AUTOMATION IDLE: NO ZONES TO MANAGE ===")
                 return
 
@@ -1119,14 +1158,16 @@ class SmartAirconController(hass.Hass):
 
     def _should_activate_algorithm(self, target_mode: HVACMode) -> bool:
         """Determine if algorithm should be activated.
-        
+
         Delegates to DecisionEngine.should_activate_algorithm() for the actual decision logic.
         """
         current_hvac_mode = self.state_manager.current_hvac_mode
-        self.log(f"Checking activation: target={target_mode.value}, current={current_hvac_mode}")
+        self.log(
+            f"Checking activation: target={target_mode.value}, current={current_hvac_mode}"
+        )
 
         # Let DecisionEngine make the decision
-        return self.decision_engine.should_activate_algorithm(
+        return self.decision_engine.should_turn_on_aircon(
             self.state_manager, target_mode, current_hvac_mode
         )
 
@@ -1150,34 +1191,38 @@ class SmartAirconController(hass.Hass):
 
     def _should_switch_to_idle_directly(self, target_mode: HVACMode) -> bool:
         """Determine if we should switch to idle mode when algorithm is inactive.
-        
+
         Delegates to DecisionEngine.should_switch_to_idle() for the actual decision logic.
         """
         current_hvac_mode = self.state_manager.current_hvac_mode
-        
+
         # Only consider switching if target is idle mode and current is not idle
-        if target_mode in [HVACMode.DRY, HVACMode.FAN]:
-            if current_hvac_mode not in ["dry", "fan"]:
+        if target_mode in [HVACMode.DRY, HVACMode.FAN, HVACMode.OFF]:
+            if current_hvac_mode not in ["dry", "fan", "off"]:
                 # Convert current HVAC mode string to HVACMode enum
                 current_mode_map = {
                     "heat": HVACMode.HEAT,
                     "cool": HVACMode.COOL,
                     "dry": HVACMode.DRY,
                     "fan": HVACMode.FAN,
-                    "off": HVACMode.OFF
+                    "off": HVACMode.OFF,
                 }
-                
-                current_mode_enum = current_mode_map.get(current_hvac_mode, HVACMode.HEAT)
+
+                current_mode_enum = current_mode_map.get(
+                    current_hvac_mode, HVACMode.HEAT
+                )
                 if current_hvac_mode not in current_mode_map:
                     self.log(f"Unknown HVAC mode: {current_hvac_mode}, assuming HEAT")
-                
+
                 # Let DecisionEngine make the decision
                 return self.decision_engine.should_switch_to_idle(
                     self.state_manager, current_mode_enum
                 )
             else:
-                self.log(f"Already in idle mode: target={target_mode.value}, current={current_hvac_mode}")
-        
+                self.log(
+                    f"Already in idle mode: target={target_mode.value}, current={current_hvac_mode}"
+                )
+
         return False
 
     def _switch_to_idle_mode(self, target_mode: HVACMode):
@@ -1209,7 +1254,9 @@ class SmartAirconController(hass.Hass):
         self.executor.set_hvac_mode(target_mode)
 
         # Step 2: Wait for mode change, then restore temperatures
-        self.log("Step 2: Waiting for HVAC mode change, then will restore temperatures...")
+        self.log(
+            "Step 2: Waiting for HVAC mode change, then will restore temperatures..."
+        )
         self.run_in(self._restore_temperatures_after_mode_change, 3)  # 3 second delay
 
     def _restore_temperatures_after_mode_change(self, kwargs):
@@ -1221,13 +1268,17 @@ class SmartAirconController(hass.Hass):
         self._restore_zone_targets_from_sensors()
 
         # Step 3: Wait for temperature restoration, then set dampers
-        self.log("Step 3: Waiting for temperature restoration, then will set dampers...")
+        self.log(
+            "Step 3: Waiting for temperature restoration, then will set dampers..."
+        )
         self.run_in(self._complete_algorithm_activation, 3)  # Another 3 second delay
 
     def _complete_algorithm_activation(self, kwargs):
         """Complete algorithm activation after temperature restoration delay."""
         target_mode = self._pending_activation_mode
-        self.log(f"Step 3: Completing algorithm activation for {target_mode.value} mode")
+        self.log(
+            f"Step 3: Completing algorithm activation for {target_mode.value} mode"
+        )
 
         # Verify temperature restoration
         self._verify_temperature_restoration()
@@ -1299,9 +1350,11 @@ class SmartAirconController(hass.Hass):
                             "device_class": "temperature",
                             "source": "smart_aircon_controller",
                             "zone": zone_name,
-                        }
+                        },
                     )
-                    self.log(f"Saved {zone_name} target temp to sensor: {zone.target_temp}°C")
+                    self.log(
+                        f"Saved {zone_name} target temp to sensor: {zone.target_temp}°C"
+                    )
                 except Exception as e:
                     self.log(f"Error saving target temp for {zone_name}: {e}")
 
@@ -1314,20 +1367,24 @@ class SmartAirconController(hass.Hass):
                     sensor_state = self.get_state(sensor_entity)
                     if sensor_state not in ["unavailable", "unknown", None]:
                         stored_target = float(sensor_state)
-                        
+
                         # Use the robust temperature setting method with retry logic
                         def restoration_callback(success):
                             if success:
-                                self.log(f"✅ Successfully restored {zone_name} target temperature to {stored_target}°C")
+                                self.log(
+                                    f"✅ Successfully restored {zone_name} target temperature to {stored_target}°C"
+                                )
                             else:
-                                self.log(f"❌ Failed to restore {zone_name} target temperature to {stored_target}°C after retries")
-                        
+                                self.log(
+                                    f"❌ Failed to restore {zone_name} target temperature to {stored_target}°C after retries"
+                                )
+
                         self.executor.set_zone_temperature_with_retry(
-                            zone.entity_id, 
-                            stored_target,
-                            callback=restoration_callback
+                            zone.entity_id, stored_target, callback=restoration_callback
                         )
-                        self.log(f"Restoring {zone_name} target temperature to {stored_target}°C with retry logic...")
+                        self.log(
+                            f"Restoring {zone_name} target temperature to {stored_target}°C with retry logic..."
+                        )
                     else:
                         self.log(f"No stored target temperature found for {zone_name}")
                 except Exception as e:
@@ -1343,20 +1400,32 @@ class SmartAirconController(hass.Hass):
                     sensor_state = self.get_state(sensor_entity)
                     if sensor_state not in ["unavailable", "unknown", None]:
                         expected_target = float(sensor_state)
-                        
+
                         # Get actual target from climate entity
                         climate_entity = self.get_entity(zone.entity_id)
-                        actual_target = climate_entity.attributes.get("temperature", 0.0)
-                        actual_target = float(actual_target) if actual_target is not None else 0.0
-                        
-                        if abs(actual_target - expected_target) < 0.1:  # Within 0.1°C tolerance
-                            self.log(f"✅ {zone_name} target temperature verified: {actual_target}°C")
+                        actual_target = climate_entity.attributes.get(
+                            "temperature", 0.0
+                        )
+                        actual_target = (
+                            float(actual_target) if actual_target is not None else 0.0
+                        )
+
+                        if (
+                            abs(actual_target - expected_target) < 0.1
+                        ):  # Within 0.1°C tolerance
+                            self.log(
+                                f"✅ {zone_name} target temperature verified: {actual_target}°C"
+                            )
                         else:
-                            self.log(f"⚠️ {zone_name} target mismatch: expected {expected_target}°C, got {actual_target}°C")
+                            self.log(
+                                f"⚠️ {zone_name} target mismatch: expected {expected_target}°C, got {actual_target}°C"
+                            )
                 except Exception as e:
                     self.log(f"Error verifying target temperature for {zone_name}: {e}")
 
-    def _get_effective_target_temp(self, zone_name: str, current_target: float) -> float:
+    def _get_effective_target_temp(
+        self, zone_name: str, current_target: float
+    ) -> float:
         """Get effective target temperature - use stored sensor value if in idle mode."""
         # If in idle mode (DRY/FAN), try to use stored target temp
         if self.state_manager.current_hvac_mode in ["dry", "fan"]:
@@ -1365,11 +1434,13 @@ class SmartAirconController(hass.Hass):
                 sensor_state = self.get_state(sensor_entity)
                 if sensor_state not in ["unavailable", "unknown", None]:
                     stored_target = float(sensor_state)
-                    self.log(f"Using stored target for {zone_name}: {stored_target}°C (current: {current_target}°C)")
+                    self.log(
+                        f"Using stored target for {zone_name}: {stored_target}°C (current: {current_target}°C)"
+                    )
                     return stored_target
             except Exception as e:
                 self.log(f"Error reading stored target for {zone_name}: {e}")
-        
+
         # Use current target temperature
         return current_target
 
