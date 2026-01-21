@@ -36,17 +36,19 @@ async def to_code(config):
     # cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
-    esp32.add_idf_component(name="espressif/esp-tflite-micro", ref="1.3.5")
+    esp32.add_idf_component(
+        name="litter_robot_detect",
+        repo="https://github.com/khaiql/esp-idf-hello-world",
+        ref="main",
+        path="components/litter_robot_detect",
+        refresh=0,
+    )
 
-    esp32.add_idf_component(name="espressif/esp_jpeg", ref="1.3.1")
+    # version 1.3.1 doesn't run into incompatible compiler standard
+    esp32.add_idf_component(name="espressif/esp-tflite-micro", ref="1.3.1")
 
-    if config[CONF_USE_EMA]:
-        cg.add_define("USE_EMA")
-
-    # inferrence could take a long time, set Watchdog timeout to 10s
-    esp32.add_idf_sdkconfig_option("CONFIG_ESP_TASK_WDT_TIMEOUT_S", 20)
-
-    cg.add_build_flag("-DTF_LITE_STATIC_MEMORY")
-    cg.add_build_flag("-DTF_LITE_DISABLE_X86_NEON")
-    # cg.add_build_flag("-DESP_NN")
-    cg.add_build_flag("-DNN_OPTIMIZATIONS")
+    esp32.add_idf_sdkconfig_option("LITTER_ROBOT_MODEL_TFLITE", "y")
+    # Force Malloc to use PSRAM so your 1MB arena doesn't hit Internal RAM
+    esp32.add_idf_sdkconfig_option("CONFIG_SPIRAM_USE_MALLOC", True)
+    # Ensure large allocations (like the arena) go to PSRAM
+    esp32.add_idf_sdkconfig_option("CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL", 4096)

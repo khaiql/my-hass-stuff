@@ -1,3 +1,8 @@
+//
+// !!! WARNING !!! AUTO-GENERATED FILE!
+// PLEASE DO NOT MODIFY IT AND USE "platformio.ini":
+// https://docs.platformio.org/page/projectconf/section_env_build.html#build-flags
+//
 {
     "configurations": [
         {
@@ -180,8 +185,7 @@
                 "/Users/sle/.platformio/packages/framework-espidf/components/rt/include",
                 "/Users/sle/.platformio/packages/framework-espidf/components/spiffs/include",
                 "/Users/sle/.platformio/packages/framework-espidf/components/wifi_provisioning/include",
-                "",
-                "/Users/sle/Projects/esphome"
+                ""
             ],
             "browse": {
                 "limitSymbolsToIncludedHeaders": true,
