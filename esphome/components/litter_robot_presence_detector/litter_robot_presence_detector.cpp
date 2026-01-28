@@ -54,7 +54,7 @@ void LitterRobotPresenceDetector::inference_task() {
     if (this->prediction_result.err != ESP_OK) {
       ESP_LOGI(TAG, "Inference task failed");
     } else {
-      this->publish_state(this->prediction_result.predicted_class.c_str());
+      this->process_prediction(this->prediction_result.predicted_class);
     }
   }
   xEventGroupClearBits(this->inference_event_group, INFERENCE_IN_PROGRESS_BIT);
@@ -64,6 +64,49 @@ void LitterRobotPresenceDetector::inference_task() {
   {
     std::lock_guard<std::mutex> lock(this->image_mutex_);
     this->image_ = nullptr;
+  }
+}
+
+void LitterRobotPresenceDetector::process_prediction(const std::string &predicted_class) {
+  // Find index of the predicted class
+  int predicted_index = -1;
+  for (int i = 0; i < 3; i++) {
+    if (litter_robot_detect::CLASS_NAMES[i] == predicted_class) {
+      predicted_index = i;
+      break;
+    }
+  }
+
+  if (predicted_index != -1) {
+    // Update history
+    this->prediction_history[this->last_index] = predicted_index;
+    this->last_index = (this->last_index + 1) % PREDICTION_HISTORY_SIZE;
+
+    // Calculate votes
+    int counts[3] = {0, 0, 0};
+    for (int i = 0; i < PREDICTION_HISTORY_SIZE; i++) {
+      if (this->prediction_history[i] < 3) {
+        counts[this->prediction_history[i]]++;
+      }
+    }
+
+    // Find winner
+    int max_votes = -1;
+    int winner_index = -1;
+    for (int i = 0; i < 3; i++) {
+      if (counts[i] > max_votes) {
+        max_votes = counts[i];
+        winner_index = i;
+      }
+    }
+
+    if (winner_index != -1) {
+      this->publish_state(litter_robot_detect::CLASS_NAMES[winner_index]);
+    }
+  } else {
+    ESP_LOGW(TAG, "Unknown class predicted: %s", predicted_class.c_str());
+    // Fallback to direct publish if unknown (or maybe just ignore?)
+    this->publish_state(predicted_class.c_str());
   }
 }
 
@@ -108,7 +151,7 @@ void LitterRobotPresenceDetector::on_camera_image(const std::shared_ptr<camera::
     EventBits_t current_bit = xEventGroupGetBits(inference_event_group);
 
     // Skip this frame
-    if (current_bit == INFERENCE_IN_PROGRESS_BIT) {
+    if (current_bit & INFERENCE_IN_PROGRESS_BIT) {
       return;
     }
 
@@ -130,6 +173,8 @@ void LitterRobotPresenceDetector::loop() {
       // Clear the idle bit so we don't request 1000 times per second
       xEventGroupClearBits(this->inference_event_group, INFERENCE_IDLE_BIT);
       this->camera_instance->request_image(esphome::camera::API_REQUESTER);
+    } else {
+      ESP_LOGI(TAG, "skipping requesting image");
     }
   }
 }

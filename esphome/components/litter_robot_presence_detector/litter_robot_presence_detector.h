@@ -44,6 +44,7 @@ class LitterRobotPresenceDetector : public Component, public text_sensor::TextSe
   TaskHandle_t inference_task_handle_{nullptr};
   static void inference_task_trampoline(void *params);
   void inference_task();
+  void process_prediction(const std::string &predicted_class);
   void on_camera_image(const std::shared_ptr<esphome::camera::CameraImage> &image) override;
 #ifndef USE_EMA
   uint8_t prediction_history[PREDICTION_HISTORY_SIZE] = {0};
