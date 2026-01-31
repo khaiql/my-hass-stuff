@@ -1,0 +1,215 @@
+esphome:
+  name: litter-robot-camera
+  friendly_name: Litter Robot Cam
+
+esp32:
+  variant: esp32s3
+  framework:
+    type: esp-idf
+    version: recommended
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "e7HlsBWBKNKAMom0edjONCkmacYIAiKhI7AwRRATt3Y="
+
+# ota:
+#   - platform: esphome
+#     password: "b71ce2cc9c8d9510e02ae7e16b0b13ac"
+
+wifi:
+  ssid: chi-ngao
+  password: khongcopass
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "New-Camera Fallback Hotspot"
+    password: "wtLUTlovBGlB"
+
+# esp32_camera:
+#   name: New Camera
+#   external_clock:
+#     pin: GPIO0
+#     frequency: 20MHz
+#   i2c_pins:
+#     sda: GPIO26
+#     scl: GPIO27
+#   data_pins: [GPIO5, GPIO18, GPIO19, GPIO21, GPIO36, GPIO39, GPIO34, GPIO35]
+#   vsync_pin: GPIO25
+#   href_pin: GPIO23
+#   pixel_clock_pin: GPIO22
+#   power_down_pin: GPIO32
+#   vertical_flip: true
+#   resolution: 176x144
+#
+#
+# --- Camera config for ESP32S3 board (custom pinout) ---
+# The following config matches the provided #define pin mapping for ESP32S3:
+#
+# #define CAM_PIN_PWDN   -1
+# #define CAM_PIN_RESET  -1
+# #define CAM_PIN_XCLK    5
+# #define CAM_PIN_SIOD    8
+# #define CAM_PIN_SIOC    9
+# #define CAM_PIN_D7      4
+# #define CAM_PIN_D6      6
+# #define CAM_PIN_D5      7
+# #define CAM_PIN_D4     14
+# #define CAM_PIN_D3     17
+# #define CAM_PIN_D2     21
+# #define CAM_PIN_D1     18
+# #define CAM_PIN_D0     16
+# #define CAM_PIN_VSYNC   1
+# #define CAM_PIN_HREF    2
+# #define CAM_PIN_PCLK   15
+# #define CAM_PIN_FLASH GPIO_NUM_3
+#
+# i2c:
+#   - id: camera_i2c
+#     sda: GPIO8
+#     scl: GPIO9
+#
+# esp32_camera:
+#   external_clock:
+#     pin: GPIO5
+#     frequency: 20MHz
+#   i2c_id: camera_i2c
+#   data_pins: [GPIO16, GPIO18, GPIO21, GPIO17, GPIO14, GPIO7, GPIO6, GPIO4]
+#   vsync_pin: GPIO1
+#   href_pin: GPIO2
+#   pixel_clock_pin: GPIO15
+#   power_down_pin: -1
+#   reset_pin: -1
+#   frame_buffer_location: PSRAM
+#   frame_buffer_count: 2
+#   resolution: 176x144
+#   name: My Camera S3
+#
+# switch:
+#   - platform: gpio
+#     name: "Flashlight S3"
+#     pin:
+#       number: GPIO3
+
+# --- End ESP32S3 camera config ---
+
+# Comment out the current camera config below if using the above for ESP32S3
+# i2c:
+#   - id: camera_i2c
+#     sda: GPIO26
+#     scl: GPIO27
+
+# esp32_camera:
+#   external_clock:
+#     pin: GPIO0
+#     frequency: 20MHz
+#   i2c_id: camera_i2c
+#   data_pins: [GPIO5, GPIO18, GPIO19, GPIO21, GPIO36, GPIO39, GPIO34, GPIO35]
+#   vsync_pin: GPIO25
+#   href_pin: GPIO23
+#   pixel_clock_pin: GPIO22
+#   power_down_pin: GPIO32
+#   frame_buffer_location: PSRAM
+#   frame_buffer_count: 2
+#   resolution: 176x144
+#   name: My Camera
+
+# switch:
+#   - platform: gpio
+#     name: "Flashlight"
+#     pin:
+#       number: GPIO4
+
+# psram:
+
+######################### ESP32S3 ########################
+
+i2c:
+  - id: camera_i2c
+    sda: GPIO8
+    scl: GPIO9
+
+esp32_camera:
+  external_clock:
+    pin: GPIO5
+    frequency: 20MHz
+  i2c_id: camera_i2c
+  data_pins: [GPIO16, GPIO18, GPIO21, GPIO17, GPIO14, GPIO7, GPIO6, GPIO4]
+  vsync_pin: GPIO1
+  href_pin: GPIO2
+  pixel_clock_pin: GPIO15
+  # power_down_pin: -1
+  # reset_pin: -1
+  frame_buffer_location: PSRAM
+  frame_buffer_count: 2
+  resolution: 640x480
+  name: Litter Robot ESP32S3
+  jpeg_quality: 10
+  wb_mode: auto
+  brightness: 2
+  saturation: -1
+  # ae_level: 2
+  # contrast: 2
+  # agc_gain_ceiling: 128x
+
+switch:
+  - platform: gpio
+    name: "LED"
+    pin:
+      number: GPIO03
+psram:
+  mode: octal
+  
+# external_components:
+#   # - source:
+#   #     type: git
+#   #     url: https://github.com/khaiql/my-hass-stuff
+#   #     ref: update-2026
+#   #   components: [ litter_robot_presence_detector ]
+#   #   refresh: 0s
+
+
+# esp32_camera_web_server:
+#   - port: 8080
+#     mode: stream
+#   - port: 8081
+#     mode: snapshot
+#
+debug:
+
+text_sensor:
+  - platform: debug
+    device:
+      name: "Device Info"
+    reset_reason:
+      name: "Reset Reason"
+  - platform: litter_robot_presence_detector
+    name: "cat_detector_sensor"
+    use_ema: false
+
+sensor:
+  - platform: debug
+    free:
+      name: "Heap Free"
+    block:
+      name: "Heap Max Block"
+    loop_time:
+      name: "Loop Time"
+    psram:
+      name: "Free PSRAM"
+    cpu_frequency:
+      name: "CPU Frequency"
+
+  - platform: dfrobot_ltr308
+    name: "Light Intensity"
+    gain: 3X
+    resolution: 100ms
+    measurement_rate: 100ms
+    threshold_high: 500
+    threshold_low: 20
+    interrupt_pin: 48
+    ir_led_pin: 47
+    update_interval: 10s

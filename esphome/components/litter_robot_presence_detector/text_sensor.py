@@ -38,9 +38,9 @@ async def to_code(config):
 
     esp32.add_idf_component(
         name="litter_robot_detect",
-        repo="https://github.com/khaiql/esp-idf-hello-world",
+        repo="https://github.com/khaiql/my-idf-component",
         ref="main",
-        path="components/litter_robot_detect",
+        path="litter_robot_detect",
         refresh=0,
     )
 
