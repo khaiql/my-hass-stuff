@@ -5,3 +5,5 @@ esphome/components/litter_robot_presence_detector/model_data.copy.h
 .venv/
 .coverage
 htmlcov/
+appdeamon_apps/smart_aircon_controller/.serena/cache/python/document_symbols_cache_v20-05-25.pkl
+build/
