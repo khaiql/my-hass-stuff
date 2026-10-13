@@ -41,7 +41,6 @@ async def to_code(config):
         repo="https://github.com/khaiql/my-idf-component",
         ref="main",
         path="litter_robot_detect",
-        refresh=0,
     )
 
     # version 1.3.1 doesn't run into incompatible compiler standard
